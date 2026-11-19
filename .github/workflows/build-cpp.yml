@@ -180,7 +180,15 @@ jobs:
           key: windows-inno-6.7.4-languages-${{ env.DEPENDENCY_CACHE_REVISION }}-${{ env.ROLLING_CACHE_WEEK }}
 
       - name: Install Inno Setup
-        run: choco install innosetup --version=6.7.4 -y --no-progress
+        run: |
+          New-Item -ItemType Directory -Force -Path downloads | Out-Null
+          curl.exe -L --fail --retry 3 -o downloads\innosetup-6.7.4.exe "https://github.com/jrsoftware/issrc/releases/download/is-6_7_4/innosetup-6.7.4.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Inno Setup 6.7.4 下载失败' }
+          $innoDir = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6'
+          $p = Start-Process -FilePath downloads\innosetup-6.7.4.exe -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/ALLUSERS', "/DIR=$innoDir" -Wait -PassThru
+          if ($p.ExitCode -ne 0 -or -not (Test-Path (Join-Path $innoDir 'ISCC.exe'))) {
+            throw "Inno Setup 6.7.4 安装失败 (exit=$($p.ExitCode))"
+          }
 
       - name: Download Inno Setup translations
         if: steps.cache-inno-languages.outputs.cache-hit != 'true'
