@@ -266,6 +266,7 @@ scripts/*
 !scripts/stage-interpolation.ps1
 !scripts/build-rife-bridge.ps1
 !scripts/prepare-release-tools.ps1
+!scripts/ffmpeg-windows-release.json
 !scripts/videocr-release-requirements.txt
 !scripts/package-release-source.py
 .upstream_videocr/

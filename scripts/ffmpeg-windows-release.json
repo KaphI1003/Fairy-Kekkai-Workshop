@@ -1,0 +1,17 @@
+{
+  "repository": "FFmpeg-Builds/FFmpeg-Builds",
+  "tag": "autobuild-2026-11-18-12-39",
+  "asset": "ffmpeg-n9.0.2-57-gd838f9f9ae-win64-gpl-shared-9.0.zip",
+  "sha256": "42359d70f065f253b3cdc5ae930bc56477e4bc2b7dc43047f0692ea8ca997718",
+  "runtimeFiles": [
+    "ffmpeg.exe",
+    "ffprobe.exe",
+    "avcodec-63.dll",
+    "avdevice-63.dll",
+    "avfilter-12.dll",
+    "avformat-63.dll",
+    "avutil-61.dll",
+    "swresample-7.dll",
+    "swscale-10.dll"
+  ]
+}
