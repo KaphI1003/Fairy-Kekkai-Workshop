@@ -2,6 +2,7 @@
 # nuitka-project: --standalone
 # nuitka-project-if: {OS} == "Windows":
 #     nuitka-project: --output-filename=videocr-cli
+#     nuitka-project: --user-package-configuration-file={MAIN_DIRECTORY}/videocr-nuitka.yml
 # nuitka-project-if: {OS} == "Linux":
 #     nuitka-project: --output-filename=videocr-cli.bin
 

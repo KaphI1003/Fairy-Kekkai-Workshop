@@ -1,0 +1,9 @@
+- module-name: 'videocr'
+  dlls:
+    # PyAV uses the stable Python ABI. Include its loader and CPython's C++
+    # runtime even if dependency scanning finds a copy on the build machine.
+    - by_code:
+        setup_code: 'import os, sys'
+        filename_code: "[os.path.join(sys.base_prefix, name) for name in ('python3.dll', 'vcruntime140_1.dll') if os.path.isfile(os.path.join(sys.base_prefix, name))]"
+      dest_path: '.'
+      when: 'win32'
