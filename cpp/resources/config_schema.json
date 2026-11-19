@@ -1191,7 +1191,7 @@
     "SourceRateLimit": {
       "member": "ffmpegSourceRateLimit",
       "kind": "ConfigItem",
-      "default": true,
+      "default": false,
       "dynamicDefault": false,
       "restart": false,
       "boolean": true

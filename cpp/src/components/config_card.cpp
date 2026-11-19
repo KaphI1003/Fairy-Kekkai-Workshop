@@ -769,7 +769,8 @@ FFmpegSettingInterface::FFmpegSettingInterface(QWidget* parent)
                 {QStringLiteral("source"), QStringLiteral("24"), QStringLiteral("25"),
                  QStringLiteral("30"), QStringLiteral("50"), QStringLiteral("60")});
     boundSwitch(this, processing, ConfigKeys::ffmpegSourceRateLimit, I::SpeedHigh,
-                trText("按片源码率控制体积"), trText("H.264 / H.265 以片源平均视频码率的 120% 限速。手动填写码率时优先使用手动值。"));
+                trText("按片源码率控制体积（2-Pass VBR）"),
+                trText("H.264 / H.265 使用 CPU 两遍动态码率编码，按片源等效平均码率控制体积并保留高动态画质。手动填写码率时优先使用手动值。"));
     boundField(this, processing, ConfigKeys::ffmpegVideoBitrate, iconOf(I::SpeedHigh),
                t.VideoBitrateLimit, t.SVBLEG2EMNL);
     auto* performance = addGroup(t.PerformanceOptions);

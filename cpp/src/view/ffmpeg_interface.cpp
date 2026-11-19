@@ -29,7 +29,7 @@ FFmpegInterface::FFmpegInterface(QWidget* parent)
     });
     auto* gpu = boundSwitch(this, settingsGroup_, ConfigKeys::ffmpegGpuEncoding,
         qfw::FluentIconEnum::SpeedHigh, trText("GPU 加速编码（NVIDIA NVENC）"),
-        trText("H.264 / H.265 优先使用显卡编码。显卡或片源格式不支持时自动使用 CPU。"));
+        trText("默认推荐：H.265 + CRF 21（NVENC 自动映射 CQ + temporal-aq），开启 GPU 可提速 4–5 倍但成片体积偏大；追求更小体积请关闭 GPU 或在高级设置开启 2-Pass VBR。"));
     gpu->setObjectName(QStringLiteral("ffmpegGpuEncoding"));
     fileSelectionGroup_->adjustSize();
     fileSelectionGroup_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);

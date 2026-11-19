@@ -15,6 +15,7 @@
 #include <QRegularExpression>
 #include <QVariant>
 #include <cmath>
+#include <iterator>
 
 #include "common/config.h"
 #include "common/config_keys.h"
@@ -109,12 +110,51 @@ static QString nvencPreset(const QString& preset) {
     return presets.value(preset, "p6");
 }
 
+// NVENC -cq scale is noticeably more aggressive than x264/x265 -crf (especially 10-bit HEVC).
+// Map the shared UI quality value so GPU encodes match CPU bitrate/quality expectations.
+static int nvencQuality(const QString& codec, int quality) {
+    const int offset = codec == "libx265" ? 6 : 4;
+    return qBound(1, quality + offset, 51);
+}
+
+// Estimate an equivalent target average bitrate for 2-Pass VBR when converting
+// across codecs (e.g. AV1 -> H.265/H.264) so high-efficiency sources are not starved.
+static QString sourceTargetBitrate(const EncodeSource& src, const QString& codec) {
+    if (src.videoBitrate <= 0) return {};
+    const QString srcCodec = src.video["codec_name"].toString().toLower();
+    double factor = 1.0;
+    if (codec == "libx265") {
+        if (srcCodec == "av1") factor = 1.30;
+        else if (srcCodec == "hevc" || srcCodec == "vp9") factor = 1.10;
+        else factor = 1.00;
+    } else if (codec == "libx264") {
+        if (srcCodec == "av1") factor = 1.70;
+        else if (srcCodec == "hevc" || srcCodec == "vp9") factor = 1.35;
+        else factor = 1.15;
+    }
+    const qint64 kbps = qMax<qint64>(1, qRound64(src.videoBitrate * factor / 1000.0));
+    return QString::number(kbps) + 'k';
+}
+
+static QString passLogPrefix(const QString& workDir) {
+    QString dir = QDir::toNativeSeparators(QFileInfo(workDir).absoluteFilePath());
+#ifdef Q_OS_WIN
+    wchar_t shortName[32768];
+    const DWORD len = GetShortPathNameW(reinterpret_cast<LPCWSTR>(dir.utf16()),
+                                         shortName, DWORD(std::size(shortName)));
+    if (len && len < std::size(shortName)) dir = QString::fromWCharArray(shortName, int(len));
+#endif
+    return QDir(dir).filePath(QStringLiteral("ffmpeg2pass"));
+}
+
 static QStringList buildFfmpegCommand(const FFmpegTask& task, const EncodeSource& src,
                                       const SubtitleLayer& layer, const QString& destination,
                                       const QString& codec, int quality, const QString& gpuFormat,
-                                      bool softwareDecode) {
+                                      bool softwareDecode, const QString& targetBitrate = {},
+                                      int pass = 0, const QString& passLog = {}) {
     QStringList cmd{"-nostdin", "-hide_banner", "-xerror"};
     const bool gpu = !gpuFormat.isEmpty();
+    const bool twoPass = !gpu && pass > 0 && !targetBitrate.isEmpty();
     if (gpu) cmd << "-loglevel" << "level+info";
     const QString container = QFileInfo(destination).suffix().toLower();
 
@@ -132,16 +172,22 @@ static QStringList buildFfmpegCommand(const FFmpegTask& task, const EncodeSource
     if (gpu) {
         cmd << "-c:v" << (codec == "libx265" ? "hevc_nvenc" : "h264_nvenc")
             << "-pix_fmt" << gpuFormat << "-preset" << nvencPreset(preset) << "-tune" << "hq"
-            << "-rc" << "vbr" << "-cq" << QString::number(quality) << "-b:v" << "0"
+            << "-rc" << "vbr" << "-cq" << QString::number(nvencQuality(codec, quality)) << "-b:v" << "0"
             << "-multipass" << "fullres" << "-rc-lookahead" << "32" << "-g" << "300"
-            << "-bf" << "4" << "-b_ref_mode" << "middle" << "-spatial-aq" << "1";
+            << "-bf" << "4" << "-b_ref_mode" << "middle" << "-spatial-aq" << "1"
+            << "-temporal-aq" << "1";
     } else {
         cmd << "-c:v" << codec;
-        if (codec != "copy") cmd << "-crf" << QString::number(quality);
+        if (twoPass) {
+            cmd << "-b:v" << targetBitrate << "-pass" << QString::number(pass)
+                << "-passlogfile" << passLog;
+        } else if (codec != "copy") {
+            cmd << "-crf" << QString::number(quality);
+        }
         if (codec == "libx264" || codec == "libx265") cmd << "-preset" << preset;
     }
     if (codec == "libx265") {
-        if (container == "mp4" || container == "mov") cmd << "-tag:v" << "hvc1";
+        if (pass != 1 && (container == "mp4" || container == "mov")) cmd << "-tag:v" << "hvc1";
         const QString fmt = src.video["pix_fmt"].toString();
         if (!gpu && (fmt == "yuv420p" || fmt == "yuv422p" || fmt == "yuv444p"))
             cmd << "-pix_fmt" << fmt + "10le";
@@ -192,18 +238,22 @@ static QStringList buildFfmpegCommand(const FFmpegTask& task, const EncodeSource
         cmd << layer.colorArgs;
     }
 
-    const QString audioMode = stringValue(ConfigKeys::ffmpegAudioMode);
-    const QString audioCodec = src.audio["codec_name"].toString();
-    const bool compatible = container == "mkv" || ((container == "mp4" || container == "mov")
-        && (audioCodec == "aac" || audioCodec == "mp3" || audioCodec == "ac3" || audioCodec == "eac3"))
-        || (container == "webm" && (audioCodec == "opus" || audioCodec == "vorbis"));
-    if (!src.audio.isEmpty() && audioMode != "none") {
-        cmd << "-map" << QStringLiteral("0:%1").arg(src.audio["index"].toInt());
-        const QString enc = audioMode == "copy" || (audioMode == "auto" && compatible)
-            ? "copy" : stringValue(ConfigKeys::ffmpegAudioCodec);
-        cmd << "-c:a" << enc;
-        if (enc != "copy") cmd << "-b:a" << stringValue(ConfigKeys::ffmpegAudioBitrate);
-    } else cmd << "-an";
+    if (pass == 1) {
+        cmd << "-an";
+    } else {
+        const QString audioMode = stringValue(ConfigKeys::ffmpegAudioMode);
+        const QString audioCodec = src.audio["codec_name"].toString();
+        const bool compatible = container == "mkv" || ((container == "mp4" || container == "mov")
+            && (audioCodec == "aac" || audioCodec == "mp3" || audioCodec == "ac3" || audioCodec == "eac3"))
+            || (container == "webm" && (audioCodec == "opus" || audioCodec == "vorbis"));
+        if (!src.audio.isEmpty() && audioMode != "none") {
+            cmd << "-map" << QStringLiteral("0:%1").arg(src.audio["index"].toInt());
+            const QString enc = audioMode == "copy" || (audioMode == "auto" && compatible)
+                ? "copy" : stringValue(ConfigKeys::ffmpegAudioCodec);
+            cmd << "-c:a" << enc;
+            if (enc != "copy") cmd << "-b:a" << stringValue(ConfigKeys::ffmpegAudioBitrate);
+        } else cmd << "-an";
+    }
 
     // 帧率设置
     const QString fpsOption = stringValue(ConfigKeys::ffmpegFps);
@@ -211,21 +261,19 @@ static QStringList buildFfmpegCommand(const FFmpegTask& task, const EncodeSource
         cmd << QStringLiteral("-r") << fpsOption;
     else if (codec != "copy") cmd << "-fps_mode" << "passthrough" << "-enc_time_base:v" << "filter";
 
-    const QString manualLimit = stringValue(ConfigKeys::ffmpegVideoBitrate).trimmed();
-    if (codec == "libx264" || codec == "libx265") {
-        if (!manualLimit.isEmpty()) {
-            cmd << "-maxrate" << manualLimit << "-bufsize" << manualLimit;
-        } else if (boolValue(ConfigKeys::ffmpegSourceRateLimit) && src.videoBitrate > 0) {
-            const qint64 kbps = qMax<qint64>(1, qRound64(src.videoBitrate * 1.20 / 1000));
-            // Let motion borrow bits from static scenes without a large startup burst on short clips.
-            const double seconds = qBound(1.0, src.duration * 0.20, 6.0);
-            cmd << "-maxrate" << QString::number(kbps) + 'k'
-                << "-bufsize" << QString::number(qRound64(kbps * seconds)) + 'k';
-        }
-    } else if (codec == "libvpx-vp9") {
+    if (codec == "libvpx-vp9") {
+        const QString manualLimit = stringValue(ConfigKeys::ffmpegVideoBitrate).trimmed();
         cmd << "-b:v" << (manualLimit.isEmpty() ? QStringLiteral("0") : manualLimit);
     }
-    cmd << "-y" << destination;
+    if (pass == 1) {
+#ifdef Q_OS_WIN
+        cmd << "-f" << "null" << "NUL";
+#else
+        cmd << "-f" << "null" << "/dev/null";
+#endif
+    } else {
+        cmd << "-y" << destination;
+    }
     return cmd;
 }
 
@@ -280,21 +328,47 @@ bool FFmpegWorker::encode(QString& error) {
         taskLogger_->info(layer.description);
     }
     const QString staged = work.filePath("output." + out.suffix());
-    const QString gpuFormat = task_->preferGpu
-        ? nvencPixelFormat(codec, src.video["pix_fmt"].toString(), quality) : QString();
-    const auto attempt = [&](const QString& format, bool softwareDecode, bool* nvencFailed) {
-        const auto args = buildFfmpegCommand(*task_, src, layer, staged, codec, quality, format, softwareDecode);
-        taskLogger_->info(ffmpegPath() + ' ' + args.join(' '));
-        return !cancelled_.load() && runStage(args, nvencFailed);
-    };
-    bool nvencFailed = false;
-    if (task_->preferGpu && gpuFormat.isEmpty())
-        taskLogger_->info(QStringLiteral("当前编码设置或片源像素格式使用原编码方式：") + codec);
-    if (!attempt(gpuFormat, false, gpuFormat.isEmpty() ? nullptr : &nvencFailed)) {
-        if (!nvencFailed || cancelled_.load()) return false;
-        taskLogger_->warning(QStringLiteral("NVENC 不可用，使用 CPU 从头压制：") + codec);
-        lastEmit_ = 0;
-        if (!attempt({}, true, nullptr)) return false;
+    const QString manualLimit = stringValue(ConfigKeys::ffmpegVideoBitrate).trimmed();
+    QString twoPassTarget;
+    if (codec == "libx264" || codec == "libx265") {
+        if (!manualLimit.isEmpty())
+            twoPassTarget = manualLimit;
+        else if (boolValue(ConfigKeys::ffmpegSourceRateLimit))
+            twoPassTarget = sourceTargetBitrate(src, codec);
+    }
+    if (!twoPassTarget.isEmpty()) {
+        taskLogger_->info(
+            QStringLiteral("启用 2-Pass VBR 体积控制（CPU %1，目标平均码率 %2）").arg(codec, twoPassTarget));
+        const QString passLog = passLogPrefix(work.path());
+        const auto runPass = [&](int pass) {
+            progressOffset_ = pass == 1 ? 0.0 : 50.0;
+            progressScale_ = 0.5;
+            lastEmit_ = 0;
+            const auto args = buildFfmpegCommand(*task_, src, layer, staged, codec, quality, {},
+                                                 false, twoPassTarget, pass, passLog);
+            taskLogger_->info(ffmpegPath() + ' ' + args.join(' '));
+            return !cancelled_.load() && runStage(args, nullptr);
+        };
+        if (!runPass(1) || !runPass(2)) return false;
+    } else {
+        progressOffset_ = 0.0;
+        progressScale_ = 1.0;
+        const QString gpuFormat = task_->preferGpu
+            ? nvencPixelFormat(codec, src.video["pix_fmt"].toString(), quality) : QString();
+        const auto attempt = [&](const QString& format, bool softwareDecode, bool* nvencFailed) {
+            const auto args = buildFfmpegCommand(*task_, src, layer, staged, codec, quality, format, softwareDecode);
+            taskLogger_->info(ffmpegPath() + ' ' + args.join(' '));
+            return !cancelled_.load() && runStage(args, nvencFailed);
+        };
+        bool nvencFailed = false;
+        if (task_->preferGpu && gpuFormat.isEmpty())
+            taskLogger_->info(QStringLiteral("当前编码设置或片源像素格式使用原编码方式：") + codec);
+        if (!attempt(gpuFormat, false, gpuFormat.isEmpty() ? nullptr : &nvencFailed)) {
+            if (!nvencFailed || cancelled_.load()) return false;
+            taskLogger_->warning(QStringLiteral("NVENC 不可用，使用 CPU 从头压制：") + codec);
+            lastEmit_ = 0;
+            if (!attempt({}, true, nullptr)) return false;
+        }
     }
     if (cancelled_.load()) return false;
 #ifdef Q_OS_WIN
@@ -329,7 +403,7 @@ bool FFmpegWorker::runStage(const QStringList& args, bool* nvencFailed) {
         R"(\[(?:hevc|h264)_nvenc @[^\]]*\]\s*\[(?:error|fatal|panic)\]|)"
         R"(No device available for decoder|Device setup failed for decoder|)"
         R"(Unknown encoder '(?:hevc|h264)_nvenc'|)"
-        R"(Unrecognized option '(?:rc|cq|multipass|rc-lookahead|spatial-aq|b_ref_mode)')"),
+        R"(Unrecognized option '(?:rc|cq|multipass|rc-lookahead|spatial-aq|temporal-aq|b_ref_mode)')"),
         QRegularExpression::CaseInsensitiveOption);
     QString tail;
     do {
@@ -365,7 +439,8 @@ void FFmpegWorker::parseProgress(const QString& data) {
     const double current = round2(match.captured(1).toInt() * 3600 +
                                   match.captured(2).toInt() * 60 +
                                   match.captured(3).toDouble());
-    const int progress = qMin(100, int(current / duration_ * 100));
+    const int progress = qBound(
+        0, int(progressOffset_ + (current / duration_ * 100.0) * progressScale_), 100);
 
     QString size;
     const auto sizeMatch = sizeRe().match(data);

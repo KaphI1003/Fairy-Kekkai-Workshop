@@ -13,6 +13,8 @@
   Migrated to whisper.cpp with Vulkan GPU and CPU inference, adding Silero VAD and related settings to reduce interference from silent sections.
 
 ### 改进 / Improved
+- 优化视频压制质量与体积控制：为 NVIDIA NVENC 补齐 CRF→CQ 标尺映射并启用 `temporal-aq`，移除单遍硬码率上限，并将「按片源码率控制体积」升级为默认关闭的 CPU 2-Pass VBR 模式，同时在压制界面说明默认推荐参数与 GPU 加速的利弊。
+  Improved video encoding quality and size control: mapped CRF to NVENC CQ with `temporal-aq`, removed the single-pass hard bitrate cap, upgraded source-rate size control to an opt-in CPU 2-Pass VBR mode, and documented recommended defaults and GPU trade-offs in the UI.
 - Windows 安装包改用固定版本的 FFmpeg-Builds GPL 共享库构建，并提供对应源码和构建材料的索引。
   Windows installers use a pinned FFmpeg-Builds GPL shared build with an index to the corresponding source and build materials.
 - 项目详情页改用可折叠内容和分页，减少页面拥挤，保留批量操作。

@@ -49,6 +49,8 @@ private:
     std::shared_ptr<FFmpegTask> task_;
     double duration_ = 0.0;
     double lastEmit_ = 0.0;
+    double progressOffset_ = 0.0;
+    double progressScale_ = 1.0;
     QSharedPointer<Logger> taskLogger_;
 
 };
