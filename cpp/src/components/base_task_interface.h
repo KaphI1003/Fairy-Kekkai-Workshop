@@ -34,6 +34,7 @@ signals:
     // 是否重复 任务路径列表 是否发送消息（对应 Python returnTask）
     void returnTask(bool duplicated, const QStringList& paths, bool notify);
 protected:
+    void addPreparedTask(const std::shared_ptr<TaskBase>& task);
     // ---------- 子类扩展点 ----------
     // 由参数创建任务对象（含输出路径修正）；返回 nullptr 则忽略本次添加
     virtual std::shared_ptr<TaskBase> createTask(const QString& input,

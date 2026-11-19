@@ -1,4 +1,42 @@
 {
+  "Interpolation": {
+    "RateMode": {"default": "preset", "options": ["preset", "multiply", "custom"]},
+    "PresetRate": {"default": "60/1", "options": ["60/1", "60000/1001", "120/1", "120000/1001", "50/1", "30/1"]},
+    "Multiplier": {"default": 2, "range": [2, 4]},
+    "CustomRate": {"default": 60, "range": [1, 240]},
+    "Model": {"default": "rife-v4.6", "options": ["rife-v4.6", "rife-v4"]},
+    "ReuseHolds": {"default": true, "boolean": true},
+    "ProtectCuts": {"default": true, "boolean": true},
+    "SceneThreshold": {"default": 30, "range": [5, 80]},
+    "Quality": {"default": "balanced", "options": ["balanced", "high", "small"]},
+    "Codec": {"default": "libx264", "options": ["libx264", "libx265"]},
+    "Audio": {"default": "copy", "options": ["copy", "aac", "none"]},
+    "Container": {"default": "mp4", "options": ["mp4", "mkv"]},
+    "Gpu": {"default": -1, "range": [-1, 15]},
+    "BatchFrames": {"default": 16, "range": [1, 120]},
+    "SpatialTta": {"default": false, "boolean": true},
+    "TemporalTta": {"default": false, "boolean": true},
+    "Uhd": {"default": false, "boolean": true}
+  },
+  "Superres": {
+    "SizeMode": {"default": "preset", "options": ["preset", "scale", "custom"]},
+    "PresetHeight": {"default": 1080, "options": [720, 1080, 1440, 2160]},
+    "Scale": {"default": 2, "range": [2, 4]},
+    "Width": {"default": 1920, "range": [2, 16384]},
+    "Height": {"default": 1080, "range": [2, 16384]},
+    "LockRatio": {"default": true, "boolean": true},
+    "Fit": {"default": "pad", "options": ["pad", "crop"]},
+    "Model": {"default": "realesr-animevideov3", "options": ["realesr-animevideov3", "realesrgan-x4plus", "realesrgan-x4plus-anime", "2x_AniSD_G6i1_SPAN_215K"]},
+    "ReuseIdenticalFrames": {"default": true, "boolean": true},
+    "Quality": {"default": "balanced", "options": ["balanced", "high", "small"]},
+    "Codec": {"default": "libx264", "options": ["libx264", "libx265"]},
+    "Audio": {"default": "copy", "options": ["copy", "aac", "none"]},
+    "Container": {"default": "mp4", "options": ["mp4", "mkv"]},
+    "Gpu": {"default": -1, "range": [-1, 15]},
+    "Tile": {"default": 0, "range": [0, 4096]},
+    "BatchFrames": {"default": 16, "range": [1, 120]},
+    "Tta": {"default": false, "boolean": true}
+  },
   "MainWindow": {
     "MicaEnabled": {
       "member": "micaEnabled",
@@ -383,6 +421,20 @@
       "dynamicDefault": true,
       "restart": false
     },
+    "CpuPaddleocrPath": {
+      "member": "cpuPaddleocrPath",
+      "kind": "ConfigItem",
+      "default": null,
+      "dynamicDefault": true,
+      "restart": false
+    },
+    "GpuPaddleocrPath": {
+      "member": "gpuPaddleocrPath",
+      "kind": "ConfigItem",
+      "default": null,
+      "dynamicDefault": true,
+      "restart": false
+    },
     "supportFilesPath": {
       "member": "supportFilesPath",
       "kind": "ConfigItem",
@@ -477,7 +529,7 @@
     "FramesToSkip": {
       "member": "framesToSkip",
       "kind": "RangeConfigItem",
-      "default": 2,
+      "default": 0,
       "dynamicDefault": false,
       "restart": false,
       "range": [
@@ -511,7 +563,7 @@
       "member": "useGpu",
       "kind": "ConfigItem",
       "default": true,
-      "dynamicDefault": false,
+      "dynamicDefault": true,
       "restart": false,
       "boolean": true
     },
@@ -538,6 +590,38 @@
       "dynamicDefault": false,
       "restart": false,
       "boolean": true
+    },
+    "RecognizeSubtitleColors": {
+      "member": "recognizeSubtitleColors",
+      "kind": "ConfigItem",
+      "default": true,
+      "dynamicDefault": false,
+      "restart": false,
+      "boolean": true
+    },
+    "RecognizeSubtitlePosition": {
+      "member": "recognizeSubtitlePosition",
+      "kind": "ConfigItem",
+      "default": true,
+      "dynamicDefault": false,
+      "restart": false,
+      "boolean": true
+    },
+    "RecognizeSubtitleFontSize": {
+      "member": "recognizeSubtitleFontSize",
+      "kind": "ConfigItem",
+      "default": true,
+      "dynamicDefault": false,
+      "restart": false,
+      "boolean": true
+    },
+    "SubtitleGap1080p": {
+      "member": "subtitleGap1080p",
+      "kind": "RangeConfigItem",
+      "default": 8,
+      "dynamicDefault": false,
+      "restart": false,
+      "range": [0, 100]
     },
     "UseServerModel": {
       "member": "useServerModel",
@@ -852,7 +936,7 @@
     "VideoCodec": {
       "member": "ffmpegVideoCodec",
       "kind": "OptionsConfigItem",
-      "default": "libx264",
+      "default": "libx265",
       "dynamicDefault": false,
       "restart": false,
       "options": [
@@ -865,7 +949,7 @@
     "Crf": {
       "member": "ffmpegCrf",
       "kind": "RangeConfigItem",
-      "default": 24,
+      "default": 21,
       "dynamicDefault": false,
       "restart": false,
       "range": [
@@ -876,7 +960,7 @@
     "Preset": {
       "member": "ffmpegPreset",
       "kind": "OptionsConfigItem",
-      "default": "medium",
+      "default": "slow",
       "dynamicDefault": false,
       "restart": false,
       "options": [
@@ -1095,6 +1179,22 @@
         "50",
         "60"
       ]
+    },
+    "GpuEncoding": {
+      "member": "ffmpegGpuEncoding",
+      "kind": "ConfigItem",
+      "default": true,
+      "dynamicDefault": false,
+      "restart": false,
+      "boolean": true
+    },
+    "SourceRateLimit": {
+      "member": "ffmpegSourceRateLimit",
+      "kind": "ConfigItem",
+      "default": true,
+      "dynamicDefault": false,
+      "restart": false,
+      "boolean": true
     },
     "VideoBitrate": {
       "member": "ffmpegVideoBitrate",

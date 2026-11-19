@@ -1,4 +1,6 @@
 #include "service/version_service.h"
+#include <QDir>
+#include <QFile>
 #include <QJsonDocument>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -7,13 +9,19 @@
 #include <QVersionNumber>
 #include <QTextDocument>
 #include <QXmlStreamReader>
+#include "common/app_data.h"
 #include "common/setting.h"
 
 namespace fkw {
 namespace {
-const QUrl releaseApi(QStringLiteral(
-    "https://api.github.com/repos/Fairy-Oracle-Sanctuary/"
-    "Fairy-Kekkai-Workshop/releases/latest"));
+QString releaseRepository() {
+    QFile file(QDir(sourceRoot()).filePath(QStringLiteral("release-repository.txt")));
+    if (!file.exists()) return QStringLiteral("Fairy-Oracle-Sanctuary/Fairy-Kekkai-Workshop");
+    if (!file.open(QIODevice::ReadOnly)) return {};
+    const QString name = QString::fromLatin1(file.readLine(256)).trimmed();
+    const QRegularExpression pattern(QStringLiteral("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"));
+    return pattern.match(name).hasMatch() ? name : QString();
+}
 QString releaseBody(const QJsonObject& release) {
     QString body = release.value(QStringLiteral("body")).toString();
     return body.replace(QStringLiteral("\r\n"), QStringLiteral("\n"))
@@ -52,19 +60,24 @@ VersionService::VersionService(QObject* parent) : QObject(parent),
 
 void VersionService::check() {
     if (checking_) return;
+    const QString repository = releaseRepository();
+    if (repository.isEmpty()) {
+        emit checked(false, tr("No release repository is configured for this build."));
+        return;
+    }
     checking_ = true;
-    QNetworkRequest request(releaseApi);
+    QNetworkRequest request(QUrl(QStringLiteral("https://api.github.com/repos/%1/releases/latest").arg(repository)));
     request.setRawHeader("User-Agent", "Fairy-Kekkai-Workshop");
     request.setTransferTimeout(5000);
     auto* reply = network_.get(request);
-    connect(reply, &QNetworkReply::finished, this, [this, reply] {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, repository] {
         const auto status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const QByteArray payload = reply->readAll();
         const QString error = reply->error() == QNetworkReply::NoError && status < 400
             ? QString() : reply->errorString();
         reply->deleteLater();
         if (!error.isEmpty()) {
-            checkAtom(error);
+            checkAtom(error, repository);
             return;
         }
         const QJsonDocument document = QJsonDocument::fromJson(payload);
@@ -88,9 +101,8 @@ void VersionService::check() {
         emit checked(QVersionNumber::compare(latest, current) > 0, {});
     });
 }
-void VersionService::checkAtom(const QString& apiError) {
-    QNetworkRequest request(QUrl(QStringLiteral(
-        "https://github.com/Fairy-Oracle-Sanctuary/Fairy-Kekkai-Workshop/releases.atom")));
+void VersionService::checkAtom(const QString& apiError, const QString& repository) {
+    QNetworkRequest request(QUrl(QStringLiteral("https://github.com/%1/releases.atom").arg(repository)));
     request.setRawHeader("User-Agent", "Mozilla/5.0");
     request.setTransferTimeout(10000);
     auto* reply = network_.get(request);

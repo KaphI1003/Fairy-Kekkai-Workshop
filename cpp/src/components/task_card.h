@@ -8,7 +8,7 @@
 #include "service/task_base.h"
 
 namespace fkw {
-enum class PreviewTaskKind { Ocr, Whisper, Translate, FFmpeg };
+enum class PreviewTaskKind { Ocr, Whisper, Translate, FFmpeg, Superres, Interpolation };
 
 // 删除确认对话框（对齐 Python DeleteTaskDialog：删除文件复选框默认不勾选）。
 // 返回是否确认删除；确认时 *deleteFiles 为复选框状态。

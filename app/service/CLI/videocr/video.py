@@ -1,20 +1,22 @@
 from __future__ import annotations
 
-import ast
 import concurrent.futures
 import json
 import os
 import queue
-import re
 import shutil
+import statistics
 import threading
+import time
+from copy import copy
 from typing import Any, cast
 
 import av
 import fast_ssim
 import wordninja_enhanced as wordninja
 
-from . import utils
+from . import color_styles as colors
+from . import frame_time, paddle_recognition, subtitle_layout, utils
 from .models import PredictedFrames, PredictedSubtitle
 from .pyav_adapter import Capture, get_video_properties
 
@@ -41,6 +43,9 @@ class Video:
     frame_timestamps: dict[int, float]
     start_time_offset_ms: float
     avg_frame_duration_ms: float
+    fps: float | None
+    frame_base: int
+    soft_events: list[dict]
 
     def __init__(self, path: str, paddleocr_path: str, det_model_dir: str, rec_model_dir: str, cls_model_dir: str, google_lens_path: str) -> None:
         self.path = path
@@ -52,6 +57,9 @@ class Video:
         self.frame_timestamps = {}
         self.start_time_offset_ms = 0.0
         self.avg_frame_duration_ms = 0.0
+        self.fps = None
+        self.frame_base = 0
+        self.soft_events = []
 
         props = get_video_properties(self.path)
         self.height = props['height']
@@ -61,13 +69,43 @@ class Video:
         self.duration_ms = props['duration_ms']
         self.start_time_offset_ms = props['start_time_offset_ms']
 
+    def _detect_cfr_fps(self) -> float | None:
+        """Return the constant frame rate, or None for VFR/too little data."""
+        if len(self.frame_timestamps) < 3:
+            return None
+        items = sorted(self.frame_timestamps.items())
+        deltas: list[float] = []
+        for (left_index, left_ms), (right_index, right_ms) in zip(items, items[1:]):
+            step = right_index - left_index
+            if step <= 0:
+                continue
+            delta = (right_ms - left_ms) / step
+            if delta > 0:
+                deltas.append(delta)
+        if len(deltas) < 2:
+            return None
+        median = statistics.median(deltas)
+        if median <= 0:
+            return None
+        # A tiny tolerance absorbs 59.94 fps PTS rounding; a real VFR file
+        # (mixed 23.976/29.97/60) exceeds it and is left untouched.
+        if any(abs(delta - median) > 0.5 for delta in deltas):
+            return None
+        return frame_time.snap_fps(1000.0 / median)
+
     def run_ocr(self, use_gpu: bool, ocr_engine: str, lang: str, use_angle_cls: bool, time_start: str, time_end: str, conf_threshold: int,
                 use_fullframe: bool, brightness_threshold: int | None, ssim_threshold: int, subtitle_position: str, frames_to_skip: int,
                 crop_zones: list[dict[str, int]], ocr_image_max_width: int, disable_stitching: bool, normalize_to_simplified_chinese: bool,
                 temp_dir: str | None = None) -> None:
         conf_threshold_ratio = conf_threshold / 100
         ssim_threshold_ratio = ssim_threshold / 100
+        # Colours are sampled from raw video, independently of filtered JPEGs.
+        self._hold_temp_for_colors = False
+        self._frame_image_paths: dict[tuple[int, int], str] = {}
         self.lang = lang
+        self.soft_events = utils.extract_soft_subtitle_events(self.path)
+        if self.soft_events:
+            print(f"soft_subs: {len(self.soft_events)} styled events", flush=True)
         self.use_fullframe = use_fullframe
         self.validated_zones = []
         self.pred_frames_zone1 = []
@@ -162,6 +200,7 @@ class Video:
             val_zone['scale_str'] = f"{target_w}:{target_h}:flags=area:threads=1"
 
         temp_dir = utils.create_clean_temp_dir(temp_dir)
+        self._temp_dir = temp_dir
 
         try:
             raw_queue: queue.Queue[Any] = queue.Queue(maxsize=100)
@@ -539,6 +578,14 @@ class Video:
                 if max_idx > min_idx:
                     total_duration = self.frame_timestamps[max_idx] - self.frame_timestamps[min_idx]
                     self.avg_frame_duration_ms = total_duration / (max_idx - min_idx)
+            self.fps = self._detect_cfr_fps()
+            if self.fps is not None and self.frame_timestamps:
+                first_index = min(self.frame_timestamps)
+                first_ms = self.frame_timestamps[first_index] - self.start_time_offset_ms
+                self.frame_base = max(
+                    0,
+                    frame_time.frame_at(int(round(first_ms)), self.fps) - first_index,
+                )
 
             if det_counter == 0:
                 return
@@ -560,28 +607,7 @@ class Video:
 
             print("Starting PaddleOCR...", flush=True)
 
-            det_ocr_outputs: dict[str, list[Any]] = {}
-            current_image = None
-            det_image_index = 0
-
-            for line in utils.stream_cli_process(args, "paddleocr_error.log"):
-                line = line.strip()
-
-                if "ppocr INFO: **********" in line:
-                    match = re.search(r"\*+(.+?)\*+$", line)
-                    if match:
-                        current_image = os.path.basename(match.group(1)).strip()
-                        det_ocr_outputs[current_image] = []
-                        det_image_index += 1
-                        print(f"\rStep 2/3: Performing Text-Detection on image {det_image_index} of {det_counter}", end="", flush=True)
-                elif current_image and '[[' in line:
-                    try:
-                        match = re.search(r"ppocr INFO:\s*(\[.+\])", line)
-                        if match:
-                            parsed = ast.literal_eval(match.group(1))
-                            det_ocr_outputs[current_image].append(parsed)
-                    except Exception as e:
-                        print(f"Error parsing detection for {current_image}: {e}", flush=True)
+            det_ocr_outputs = paddle_recognition.recognize(args, list(det_stitch_map), use_gpu)
             print()
 
             parsed_detections: dict[int, list[Any]] = {0: [], 1: []}
@@ -775,6 +801,13 @@ class Video:
                 return
 
             # --------------------------------------------------------
+            self._frame_image_paths = {
+                (meta["zone_idx"], meta["frame_idx"]): os.path.join(
+                    rec_images_dir, filename
+                )
+                for filename, meta in rec_image_map.items()
+            }
+
             # Recognition Pass
             # --------------------------------------------------------
             rec_ocr_outputs: dict[str, list[Any]] = {}
@@ -854,25 +887,7 @@ class Video:
 
                 print("Starting PaddleOCR...", flush=True)
 
-                current_image = None
-                for line in utils.stream_cli_process(args, "paddleocr_error.log"):
-                    line = line.strip()
-
-                    if "ppocr INFO: **********" in line:
-                        match = re.search(r"\*+(.+?)\*+$", line)
-                        if match:
-                            current_image = os.path.basename(match.group(1)).strip()
-                            rec_ocr_outputs[current_image] = []
-                            ocr_image_index += 1
-                            print(f"\rStep 3/3: Performing OCR on image {ocr_image_index} of {len(rec_image_map)}", end="", flush=True)
-                    elif current_image and '[[' in line:
-                        try:
-                            match = re.search(r"ppocr INFO:\s*(\[.+\])", line)
-                            if match:
-                                parsed = ast.literal_eval(match.group(1))
-                                rec_ocr_outputs[current_image].append(parsed)
-                        except Exception as e:
-                            print(f"Error parsing OCR for {current_image}: {e}", flush=True)
+                rec_ocr_outputs = paddle_recognition.recognize(args, list(rec_image_map), use_gpu)
                 print()
 
             # Map 2D coordinates
@@ -925,7 +940,104 @@ class Video:
             self.pred_frames_zone2 = frame_predictions_list.get(1, [])
 
         finally:
+            # Style sampling reads raw video; OCR JPEGs need not outlive OCR.
+            if not getattr(self, "_hold_temp_for_colors", False):
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def _sample_cue_colors(self, cues: list[subtitle_layout.AssCue]) -> None:
+        """Select visible middle frames from raw video without additional OCR."""
+        key = [(cue.subtitle, cue.line_span) for cue in cues]
+        if getattr(self, "_color_cue_key", None) == key:
+            return
+        requests = []
+        for cue in cues:
+            sub = cue.subtitle
+            start_ms, end_ms = self._get_subtitle_ms_times(sub)
+            boxes = []
+            by_zone = {}
+            line_count = len(sub.text.splitlines()) if cue.line_span is not None else None
+            for frame in sub.frames:
+                if (frame.text.strip() and frame.lines
+                        and (line_count is None or len(frame.lines) == line_count)):
+                    by_zone.setdefault(frame.zone_index, []).append(frame)
+            for zone_index, frames in by_zone.items():
+                zone = self.validated_zones[zone_index]
+                crop_w, crop_h, crop_x, crop_y = map(int, zone["crop_str"].split(":"))
+                reference = min(frames, key=lambda frame: (
+                    abs(self.frame_timestamps.get(frame.start_index, start_ms + self.start_time_offset_ms)
+                        - self.start_time_offset_ms - (start_ms + end_ms) / 2)
+                    / max(1, end_ms - start_ms) - .2 * min(1, frame.confidence)))
+                first, last = cue.line_span or (0, len(reference.lines))
+                for line in reference.lines[first:last]:
+                    for word in line:
+                        boxes.append([[crop_x + x * crop_w / zone["w"],
+                                       crop_y + y * crop_h / zone["h"]]
+                                      for x, y in word.bounding_box])
+            requests.append(colors.ColorRequest(start_ms, end_ms, boxes))
+        print("colors: analysing raw colour frames on CPU...", flush=True)
+        observations, stats = colors.sample_video_colors(
+            self.path, requests, budget_seconds=getattr(self, "color_style_budget", 360.0),
+            progress=lambda done, total: print(f"colors: sampling cue {done} of {total}", flush=True))
+        self._color_observations = observations
+        self._color_stats = stats
+        self._color_requests = requests
+        self._color_cue_key = key
+        print(f"colors: sampling took {stats['seconds']:.2f}s, "
+              f"analysed {stats['analysed_frames']}/{stats['sampled_frames']} candidate frames", flush=True)
+        print(f"colors: decode and selection {stats['decode_seconds']:.2f}s, "
+              f"parent waiting for results {stats.get('queue_wait_seconds', 0):.2f}s, "
+              f"gaps between jobs summed across workers {stats.get('worker_gap_seconds', 0):.2f}s",
+              flush=True)
+
+    def _dump_debug_frames(self) -> None:
+        debug_dump = os.environ.get("FKW_OCR_DEBUG_DUMP")
+        if not debug_dump:
+            return
+        payload = {
+            "fps": self.fps,
+            "frame_base": self.frame_base,
+            "zones": {
+                1: [
+                    {
+                        "frame": frame.start_index,
+                        "text": frame.text,
+                        "confidence": frame.confidence,
+                        "fill_rgb": frame.fill_rgb,
+                        "outline_rgb": frame.outline_rgb,
+                        "color_confidence": frame.color_confidence,
+                        "lines": [
+                            {
+                                "box": line[0].bounding_box if line else [],
+                                "text": "".join(word.text for word in line),
+                            }
+                            for line in frame.lines
+                        ],
+                    }
+                    for frame in self.pred_frames_zone1
+                ],
+                2: [
+                    {
+                        "frame": frame.start_index,
+                        "text": frame.text,
+                        "confidence": frame.confidence,
+                    }
+                    for frame in self.pred_frames_zone2
+                ],
+            },
+        }
+        with open(debug_dump, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+
+    def _release_temp(self) -> None:
+        temp_dir = getattr(self, "_temp_dir", None)
+        if temp_dir:
             shutil.rmtree(temp_dir, ignore_errors=True)
+        self._temp_dir = None
+        self._frame_image_paths = {}
+
+    def cleanup(self) -> None:
+        """Release recognition images kept for per-cue color sampling."""
+        self._release_temp()
 
     def get_subtitles(self, sim_threshold: int, max_merge_gap_sec: float, lang: str, post_processing: bool, min_subtitle_duration_sec: float, subtitle_alignments: list[str | None]) -> str:
         self._generate_subtitles(sim_threshold, max_merge_gap_sec, lang, post_processing, min_subtitle_duration_sec, subtitle_alignments)
@@ -943,8 +1055,177 @@ class Video:
 
         return ''.join(srt_lines)
 
+    def get_ass(self, color_styles: bool = True, *, position_styles: bool = True,
+                font_size_styles: bool = True, gap_1080p: int = 8) -> str:
+        """Serialize frame-level cues as ASS, ready for Aegisub.
+
+        ASS stores centiseconds.  Both boundaries are floored so Aegisub's
+        START/END frame mapping (which biases by one millisecond) lands on the
+        intended start frame and the intended last visible frame.  When
+        ``color_styles`` is enabled, cues with the same detected fill/outline
+        color pair share one ASS style.
+        """
+        if not hasattr(self, "pred_subs"):
+            raise RuntimeError("get_subtitles() must run before get_ass()")
+        if not 0 <= gap_1080p <= 100:
+            raise ValueError("The 1080p subtitle gap must be between 0 and 100 pixels")
+
+        width = self.width or 1920
+        height = self.height or 1080
+        scale = height / 1080.0
+        font_size = max(16, round(80 * scale, 1))
+        margin_v = max(10, round(72 * scale))
+        outline = round(3.5 * scale, 2)
+        shadow = 1
+        outline_text = f"{outline:g}"
+        cues = subtitle_layout.prepare_cues(
+            self.pred_subs, getattr(self, "validated_zones", []),
+            getattr(self, "_merged_ass_sources", {}),
+            position=position_styles, font_size=font_size_styles,
+        )
+
+        if color_styles:
+            self._sample_cue_colors(cues)
+        palette_started = time.perf_counter()
+        observations = list(getattr(self, "_color_observations", [])) if color_styles else []
+        soft_exact = 0
+        for index, cue in enumerate(cues):
+            if color_styles and self.soft_events:
+                start_ms, end_ms = self._get_subtitle_ms_times(cue.subtitle)
+                event = utils.match_soft_event(self.soft_events, start_ms, end_ms, cue.text)
+                if event:
+                    observations[index] = colors.ColorObservation(
+                        event["fill"], event["outline"], 1.0, 1.0, 1.0, 10, 2, "soft_subtitle")
+                    soft_exact += 1
+        if color_styles:
+            palette_objects, assignments = colors.build_palettes(observations)
+            fill_matches = colors.assign_by_fill(observations, assignments, palette_objects)
+        else:
+            palette_objects, assignments = [], [None] * len(cues)
+            fill_matches = set()
+        palettes = [{"fill": p.fill, "outline": p.outline, "name": p.name, "count": len(p.members)}
+                    for p in palette_objects]
+        sub_palettes = [palettes[index] if index is not None else None for index in assignments]
+        defaulted = sum(index is None for index in assignments)
+        if color_styles:
+            stats = dict(getattr(self, "_color_stats", {}))
+            stats["palette_seconds"] = time.perf_counter() - palette_started
+            stats["total_seconds"] = stats.get("seconds", 0) + max(0, stats["palette_seconds"])
+            stats["styles"] = len(palettes)
+            stats["unresolved"] = defaulted
+            stats["fill_only"] = len(fill_matches)
+            stats["soft_exact"] = soft_exact
+            stats["confirmed_white_black"] = sum(
+                p["count"] for p in palettes
+                if float(colors.delta_e(colors.rgb_to_lab(p["fill"]), colors.rgb_to_lab((255, 255, 255)))) < 4
+                and float(colors.delta_e(colors.rgb_to_lab(p["outline"]), colors.rgb_to_lab((0, 0, 0)))) < 4)
+            self._color_report = {"version": 2, "summary": stats, "palettes": palettes, "cues": [
+                {"index": index, "start_ms": request.start_ms, "end_ms": request.end_ms,
+                 "text": cue.text, "fill": obs.fill, "outline": obs.outline,
+                 "fill_confidence": obs.fill_confidence, "outline_confidence": obs.outline_confidence,
+                 "confidence": obs.confidence, "support": obs.support, "frames": obs.frame_count,
+                 "reason": obs.reason, "boxes": request.boxes,
+                 "style": p["name"] if p else "Default",
+                 "fill_only_match": index in fill_matches}
+                 for index, (cue, obs, p, request) in enumerate(zip(
+                    cues, observations, sub_palettes, self._color_requests))]}
+            print(f"colors: {len(palettes)} ASS styles, fill_only={stats['fill_only']}, unresolved={defaulted}, "
+                  f"total={stats['total_seconds']:.2f}s (CPU)", flush=True)
+            if stats["total_seconds"] > getattr(self, "color_style_budget", 360.0):
+                print("colors: soft time budget exceeded; all cues were still processed", flush=True)
+
+        def ass_color(rgb) -> str:
+            return f"&H00{rgb[2]:02X}{rgb[1]:02X}{rgb[0]:02X}"
+
+        style_names = [p["name"] if p else "Default" for p in sub_palettes]
+        style_layouts, event_layouts = subtitle_layout.estimate_layout(
+            cues, style_names, video_height=height, base_font=font_size, base_margin=margin_v,
+            outline=outline, shadow=shadow, position=position_styles, font_size=font_size_styles,
+            gap_1080p=gap_1080p,
+        )
+        fallback = subtitle_layout.StyleLayout(font_size, margin_v)
+        default_layout = style_layouts.get("Default", fallback)
+        font_name = subtitle_layout.FONT_NAME
+
+        lines = [
+            "[Script Info]",
+            "; Script generated by Fairy Kekkai Workshop",
+            "ScriptType: v4.00+",
+            "WrapStyle: 0",
+            "ScaledBorderAndShadow: yes",
+            "YCbCr Matrix: TV.709",
+            f"PlayResX: {width}",
+            f"PlayResY: {height}",
+        ]
+        for palette in palettes:
+            fill = palette["fill"]
+            outline = palette["outline"]
+            lines.append(
+                f"; {palette['name']} fill=#{fill[0]:02X}{fill[1]:02X}{fill[2]:02X} "
+                f"outline=#{outline[0]:02X}{outline[1]:02X}{outline[2]:02X} "
+                f"cues={palette['count']}"
+            )
+        lines.extend(
+            [
+                "",
+                "[V4+ Styles]",
+                "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+                "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+                "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+                "Alignment, MarginL, MarginR, MarginV, Encoding",
+                f"Style: Default,{font_name},{default_layout.font_size:g},&H00FFFFFF,&H000000FF,"
+                f"&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,{outline_text},{shadow},2,10,10,"
+                f"{default_layout.margin_v},1",
+            ]
+        )
+        for palette in palettes:
+            layout = style_layouts.get(palette["name"], fallback)
+            lines.append(
+                f"Style: {palette['name']},{font_name},{layout.font_size:g},"
+                f"{ass_color(palette['fill'])},{ass_color(palette['fill'])},"
+                f"{ass_color(palette['outline'])},&H64000000,0,0,0,0,100,100,0,0,"
+                f"1,{outline_text},{shadow},2,10,10,{layout.margin_v},1"
+            )
+        lines.extend(
+            [
+                "",
+                "[Events]",
+                "Format: Layer, Start, End, Style, Name, MarginL, MarginR, "
+                "MarginV, Effect, Text",
+            ]
+        )
+        for cue, style, layout in zip(cues, style_names, event_layouts):
+            if not cue.text.strip():
+                continue
+            sub = cue.subtitle
+            start_cs, end_cs = frame_time.frame_cue_times_cs(
+                sub.index_start,
+                sub.index_end + 1,
+                fps=self.fps,
+                frame_timestamps=self.frame_timestamps,
+                start_time_offset_ms=self.start_time_offset_ms,
+                fallback_frame_duration_ms=self.avg_frame_duration_ms,
+                frame_base=self.frame_base,
+            )
+            text = cue.text.replace("\n", "\\N")
+            tags = ""
+            if layout.anchor_y is not None:
+                tags += f"\\pos({width // 2},{layout.anchor_y})"
+            if layout.font_size is not None:
+                tags += f"\\fs{layout.font_size}"
+            if tags:
+                text = "{" + tags + "}" + text
+            name = "OCR: 检查位置" if layout.review else ""
+            lines.append(
+                f"Dialogue: 0,{frame_time.format_ass_time(start_cs)},"
+                f"{frame_time.format_ass_time(end_cs)},{style},{name},0,0,{layout.margin_v},,{text}"
+            )
+        return "\n".join(lines) + "\n"
+
     def _generate_subtitles(self, sim_threshold: int, max_merge_gap_sec: float, lang: str, post_processing: bool, min_subtitle_duration_sec: float, subtitle_alignments: list[str | None]) -> None:
         print("Generating subtitles...", flush=True)
+        self._color_cue_key = None
+        self._merged_ass_sources = {}
 
         subs_zone1 = self._process_single_zone(self.pred_frames_zone1, sim_threshold, max_merge_gap_sec, lang, post_processing, min_subtitle_duration_sec)
         subs_zone2 = self._process_single_zone(self.pred_frames_zone2, sim_threshold, max_merge_gap_sec, lang, post_processing, min_subtitle_duration_sec)
@@ -960,6 +1241,9 @@ class Video:
                 self.pred_subs = self._merge_dual_zone_subtitles(subs_zone1, subs_zone2)
         else:
             self.pred_subs = []
+
+        self._dump_debug_frames()
+        self._release_temp()
 
     def _process_single_zone(self, pred_frames: list[PredictedFrames], sim_threshold: int, max_merge_gap_sec: float, lang: str,
                              post_processing: bool, min_subtitle_duration_sec: float) -> list[PredictedSubtitle]:
@@ -1031,6 +1315,12 @@ class Video:
             last_sub = merged_subs[-1]
 
             if current_sub.index_start <= last_sub.index_end:
+                if last_sub not in self._merged_ass_sources:
+                    combined = copy(last_sub)
+                    combined.frames = list(last_sub.frames)
+                    self._merged_ass_sources[combined] = [last_sub]
+                    merged_subs[-1] = last_sub = combined
+                self._merged_ass_sources[last_sub].append(current_sub)
                 last_zone_info = self.validated_zones[last_sub.zone_index]
                 current_zone_info = self.validated_zones[current_sub.zone_index]
 
@@ -1052,20 +1342,18 @@ class Video:
         end_time = utils.get_srt_timestamp_from_ms(end_ms)
         return start_time, end_time
 
-    def _get_subtitle_ms_times(self, sub: PredictedSubtitle) -> tuple[float, float]:
-        start_time_ms = self.frame_timestamps.get(sub.index_start, 0)
-        end_time_ms = self.frame_timestamps.get(sub.index_end + 1)
-
-        # For the end time, we try to get the timestamp of the next frame, if it doesn't exist, we fall back to estimating duration of last frame
-        if end_time_ms is None:
-            last_frame_ms = self.frame_timestamps.get(sub.index_end, start_time_ms)
-            end_time_ms = last_frame_ms + self.avg_frame_duration_ms
-
-        # Apply the correction to align with the container's start time
-        corrected_start_time_ms = start_time_ms - self.start_time_offset_ms
-        corrected_end_time_ms = end_time_ms - self.start_time_offset_ms
-
-        return corrected_start_time_ms, corrected_end_time_ms
+    def _get_subtitle_ms_times(self, sub: PredictedSubtitle) -> tuple[int, int]:
+        # Frame-level cue: the end is the first frame of the next cue.  CFR
+        # uses the frame index directly; VFR uses the per-frame PTS table.
+        return frame_time.frame_cue_times_ms(
+            sub.index_start,
+            sub.index_end + 1,
+            fps=self.fps,
+            frame_timestamps=self.frame_timestamps,
+            start_time_offset_ms=self.start_time_offset_ms,
+            fallback_frame_duration_ms=self.avg_frame_duration_ms,
+            frame_base=self.frame_base,
+        )
 
     def _get_subtitle_duration_sec(self, sub: PredictedSubtitle) -> float:
         start_ms, end_ms = self._get_subtitle_ms_times(sub)

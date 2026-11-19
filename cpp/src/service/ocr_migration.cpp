@@ -92,7 +92,14 @@ const QString kFontSupportDir = QStringLiteral("PaddleOCR.font.support.files");
 // 是否属于旧版引擎目录：不等于当前版本，且命中工作流名单或兜底规则。
 // 「不等于当前版本」这一条保证当前正在使用的目录永远不会被选中。
 bool isLegacyEngine(const QString& name, const QString& currentVersion) {
-    if (name.compare(currentVersion, Qt::CaseInsensitive) == 0) return false;
+    if (paddleOcrEngineNames(currentVersion).contains(name, Qt::CaseInsensitive)) return false;
+    // 用户显式配置的设备引擎同样属于在用资源，不能由启动维护删除。
+    const auto ocr = AppConfig::instance().snapshot().value(QStringLiteral("OCR")).toObject();
+    for (const auto& key : {QStringLiteral("CpuPaddleocrPath"), QStringLiteral("GpuPaddleocrPath")}) {
+        const QString path = ocr.value(key).toString();
+        if (!path.isEmpty() && QFileInfo(path).dir().dirName().compare(name, Qt::CaseInsensitive) == 0)
+            return false;
+    }
     return legacyEngineDirs().contains(name, Qt::CaseInsensitive)
         || versionDirPattern().match(name).hasMatch();
 }
@@ -112,6 +119,7 @@ bool isLegacyArchive(const QString& name, const QString& currentVersion,
                      const QString& currentSupportFiles) {
     QString stem = name;
     if (stem.endsWith(QStringLiteral(".7z"), Qt::CaseInsensitive)) stem.chop(3);
+    if (paddleOcrEngineNames(currentVersion).contains(stem, Qt::CaseInsensitive)) return false;
     if (!currentVersion.isEmpty() && stem.startsWith(currentVersion, Qt::CaseInsensitive))
         return false;
     if (!currentSupportFiles.isEmpty()

@@ -12,7 +12,11 @@ FFmpegTaskInterface::FFmpegTaskInterface(QWidget* parent)
 std::shared_ptr<TaskBase> FFmpegTaskInterface::createTask(const QString& input,
                                                           const QString& output) {
     // 修正输出扩展名；音频流探测在 Worker 线程内完成
-    return std::make_shared<FFmpegTask>(input, adjustOutputFormat(output));
+    return std::make_shared<FFmpegTask>(input, adjustOutputFormat(output), findEncodeSubtitle(input));
+}
+
+void FFmpegTaskInterface::addSubtitleTask(const QString& input, const QString& output, const QString& subtitle) {
+    addPreparedTask(std::make_shared<FFmpegTask>(input, adjustOutputFormat(output), subtitle));
 }
 
 TaskWorker* FFmpegTaskInterface::createWorker(const std::shared_ptr<TaskBase>& task) {

@@ -26,7 +26,7 @@ private:
     QList<QPair<QString, QString>> atomDownloads_;
     bool atomOcrUpdate_ = false;
     bool checking_ = false;
-    void checkAtom(const QString& apiError);
+    void checkAtom(const QString& apiError, const QString& repository);
     QList<QPair<QString, QString>> downloadLinks() const;
 };
 } // namespace fkw

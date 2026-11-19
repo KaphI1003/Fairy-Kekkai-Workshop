@@ -14,8 +14,13 @@
     [string]$BuildDir = 'build-cpp-release',
     # 待打包目录（相对仓库根）；安装包整体收录该目录
     [string]$StageDir = 'dist-cpp\Fairy-Kekkai-Workshop.dist',
+    [string]$ToolsDir = (Join-Path $PSScriptRoot 'tools'),
+    [string]$ThirdPartyNoticesDir = '',
+    [string]$ReleaseRepository = '',
+    [ValidateSet('ggml-small.bin', 'ggml-base.bin', 'ggml-base-q5_1.bin')][string]$WhisperModel = 'ggml-small.bin',
     # 额外用 Inno Setup 生成安装包
     [switch]$Setup,
+    [string]$OutputDir = 'Output',
     # ISCC.exe 路径；留空则自动查找
     [string]$ISCCPath = '',
     # 安装包文件名中的 OCR 变体，如 CPU-v3.7.0；留空则按 PADDLEOCR 标识推导
@@ -23,12 +28,15 @@
     # 写入待打包目录的 OCR 版本标识（即 PADDLEOCR 文件内容）；
     # 留空则沿用仓库根同名文件，-NoTools 时不写
     [string]$PaddleOcrTag = '',
-    # 收录整个 tools 目录（安装包必须完整，-Setup 时自动开启）
+    # 收录完整运行工具与默认转录模型（-Setup 时自动开启）
     [switch]$FullTools,
     # 不收录普通工具与 PADDLEOCR 标识
     [switch]$NoTools,
     # Clear 引擎升级：即使 -NoTools，也收录 Whisper 与 Silero VAD
     [switch]$IncludeWhisper,
+    # 可选非商业模型，需要提供原许可和转换说明。
+    [switch]$IncludeAniSd,
+    [switch]$BuildTests,
     [switch]$IncludeProjects
 )
 
@@ -44,6 +52,11 @@ $source = Join-Path $repo 'cpp'
 $target = 'Fairy-Kekkai-Workshop-Cpp'
 $exeName = 'Fairy-Kekkai-Workshop.exe'
 $issName = 'Fairy-Kekkai-Workshop.iss'
+$complete = -not $NoTools -and ($FullTools -or $Setup)
+$ToolsDir = [IO.Path]::GetFullPath($ToolsDir)
+if ($ReleaseRepository -and $ReleaseRepository -notmatch '^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$') {
+    throw 'ReleaseRepository 必须为 GitHub owner/repository。'
+}
 
 if (-not (Test-Path (Join-Path $OpenCVDir 'OpenCVConfig.cmake'))) {
     throw "未找到 OpenCV 配置: $OpenCVDir\OpenCVConfig.cmake（可用 -OpenCVDir 指定）"
@@ -75,6 +88,7 @@ $configureArgs = @(
     '-UCMAKE_TOOLCHAIN_FILE'
     '-UFFMPEG_DIR'
     '-UCMAKE_MODULE_PATH'
+    "-DFKW_BUILD_TESTS=$($BuildTests.IsPresent.ToString().ToUpperInvariant())"
 )
 $generatorArgs = @('-G', $Generator)
 if ($Generator -eq 'Ninja') {
@@ -92,13 +106,37 @@ if ($CompilerLauncher) {
 if ($LASTEXITCODE -ne 0) { throw 'CMake 配置失败。' }
 
 Write-Host '[2/4] 编译 Release...'
-& $CMakePath --build $buildPath --config Release --target $target --parallel
+$buildTargets = @($target)
+if ($BuildTests) {
+    $buildTargets += @('ocr-device-tests', 'superres-tests', 'interpolation-tests',
+        'subtitle-encode-tests', 'subtitle-translation-tests')
+}
+& $CMakePath --build $buildPath --config Release --target @buildTargets --parallel
 if ($LASTEXITCODE -ne 0) { throw 'Release 编译失败。' }
 if (-not (Test-Path $exe)) { throw "找不到编译产物: $exe" }
+if ($BuildTests) {
+    $ctest = Join-Path (Split-Path $CMakePath -Parent) 'ctest.exe'
+    & $CMakePath -E env "PATH=$QtRoot\bin;$opencvBin;$env:PATH" "FKW_SUBTITLE_TEST_TOOLS=$ToolsDir" `
+        $ctest --test-dir $buildPath -C Release --output-on-failure
+    if ($LASTEXITCODE -ne 0) { throw '回归检查失败。' }
+}
 
 Write-Host '[3/4] 收集运行库与配套文件...'
-if (Test-Path $stagePath) { Remove-Item -LiteralPath $stagePath -Recurse -Force }
+$stagePath = [IO.Path]::GetFullPath($stagePath)
+$repoPrefix = [IO.Path]::GetFullPath($repo).TrimEnd('\') + '\'
+if (-not $stagePath.StartsWith($repoPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw '暂存目录必须位于源码仓库内。'
+}
+if (Test-Path -LiteralPath $stagePath) {
+    $existingStage = Get-Item -LiteralPath $stagePath -Force
+    if ($existingStage.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw '暂存目录不能是重解析点。' }
+    if (-not (Test-Path -LiteralPath (Join-Path $stagePath '.fkw-package-stage') -PathType Leaf)) {
+        throw "暂存目录不是本脚本创建的：$stagePath。请指定新的 StageDir。"
+    }
+    Remove-Item -LiteralPath $stagePath -Recurse -Force
+}
 New-Item -ItemType Directory -Path $stagePath -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $stagePath '.fkw-package-stage') -Value 'Fairy Kekkai Workshop'
 Copy-Item -LiteralPath $exe -Destination $stagePath
 $stageExe = Join-Path $stagePath $exeName
 
@@ -108,28 +146,64 @@ if ($LASTEXITCODE -ne 0) { throw 'windeployqt 失败。' }
 # OpenCV Release 运行库（world 版 + videoio 的 ffmpeg 后端）
 foreach ($dll in @('opencv_world4120.dll', 'opencv_videoio_ffmpeg4120_64.dll')) {
     $path = Join-Path $opencvBin $dll
-    if (Test-Path $path) { Copy-Item -LiteralPath $path -Destination $stagePath }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "缺少 OpenCV 运行库：$path" }
+    Copy-Item -LiteralPath $path -Destination $stagePath
+}
+
+$licenseDir = Join-Path $stagePath 'licenses'
+New-Item -ItemType Directory -Path $licenseDir -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $repo 'LICENSE'), (Join-Path $repo 'LICENSE-TEXT') -Destination $licenseDir
+$opencvNotices = Join-Path $licenseDir 'OpenCV'
+New-Item -ItemType Directory -Path $opencvNotices -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $OpenCVDir 'LICENSE') -Destination $opencvNotices
+Copy-Item -LiteralPath (Join-Path $OpenCVDir 'etc\licenses') -Destination $opencvNotices -Recurse
+if ($ThirdPartyNoticesDir) {
+    $notices = Get-ChildItem -LiteralPath $ThirdPartyNoticesDir -Force
+    if (-not $notices) { throw '第三方许可目录为空。' }
+    foreach ($notice in $notices) { Copy-Item -LiteralPath $notice.FullName -Destination $licenseDir -Recurse }
+}
+Copy-Item -LiteralPath (Join-Path $repo 'docs\WINDOWS-RELEASE.md') -Destination $licenseDir -Force
+if ($Setup -or $ReleaseRepository) {
+    Set-Content -LiteralPath (Join-Path $stagePath 'release-repository.txt') -Value $ReleaseRepository -Encoding ascii
+}
+if ($Setup) {
+    $redist = Join-Path $ToolsDir 'vc_redist.x64.exe'
+    if (-not (Test-Path -LiteralPath $redist -PathType Leaf)) {
+        $downloads = Join-Path $repo 'downloads'
+        New-Item -ItemType Directory -Path $downloads -Force | Out-Null
+        $redist = Join-Path $downloads 'vc_redist.x64.exe'
+        if (-not (Test-Path -LiteralPath $redist -PathType Leaf)) {
+            Invoke-WebRequest 'https://aka.ms/vc14/vc_redist.x64.exe' -OutFile $redist
+        }
+    }
+    $signature = Get-AuthenticodeSignature -FilePath $redist
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'CN=Microsoft Corporation(?:,|$)') {
+        throw "Microsoft VC++ Redistributable 签名无效：$redist"
+    }
+    Copy-Item -LiteralPath $redist -Destination $stagePath
 }
 
 if (-not $NoTools) {
-    $toolSource = Join-Path $repo 'tools'
+    $toolSource = $ToolsDir
     if (-not (Test-Path $toolSource)) { throw "未找到 tools 目录: $toolSource" }
     $toolDest = Join-Path $stagePath 'tools'
     New-Item -ItemType Directory -Path $toolDest -Force | Out-Null
-    # -Setup 时安装包必须自带完整工具链，等价于 -FullTools
-    if ($FullTools -or $Setup) {
-        # Whisper 由下面的精确清单收录；转录模型和下载缓存不进安装包。
-        Get-ChildItem -LiteralPath $toolSource -Force | Where-Object {
-            $_.Name -notin @('Whisper.model', 'whisper') -and $_.Extension -ne '.zip'
-        } | ForEach-Object {
-            Copy-Item -LiteralPath $_.FullName -Destination $toolDest -Recurse
-        }
-    } else {
-        foreach ($file in @('ffmpeg.exe', 'yt-dlp.exe', 'videocr-cli.exe')) {
-            $path = Join-Path $toolSource $file
-            if (Test-Path $path) { Copy-Item -LiteralPath $path -Destination $toolDest }
-        }
+    $ffmpeg = Get-Content -LiteralPath (Join-Path $repo 'scripts\ffmpeg-windows-release.json') -Raw |
+        ConvertFrom-Json
+    $runtimeFiles = @('AviSynth.dll', 'yt-dlp.exe', 'videocr-cli.exe',
+        'vsfiltermod\VSFilterMod.dll', 'vsfiltermod\SOURCES.txt', 'vsfiltermod\AviSynth-GPL.txt',
+        'vsfiltermod\VSFilterMod-LICENSE.txt', 'vsfiltermod\OFL.TXT', 'vsfiltermod\lgpl_for_used_libs.txt')
+    $runtimeFiles += $ffmpeg.runtimeFiles
+    if ($complete) { $runtimeFiles += 'deno.exe' }
+    foreach ($file in $runtimeFiles) {
+        $path = Join-Path $toolSource $file
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "缺少发布工具：$path" }
+        $destination = Join-Path $toolDest $file
+        New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
+        Copy-Item -LiteralPath $path -Destination $destination
     }
+    & (Join-Path $repo 'scripts\stage-superres.ps1') -SourceTools $toolSource -DestinationTools $toolDest -IncludeAniSd:$IncludeAniSd
+    & (Join-Path $repo 'scripts\stage-interpolation.ps1') -SourceTools $toolSource -DestinationTools $toolDest
     # OCR 版本标识：程序运行期从 exe 同级目录读取第一行，决定 tools 下的引擎子目录
     $markerDest = Join-Path $stagePath 'PADDLEOCR'
     if ($PaddleOcrTag) {
@@ -137,11 +211,18 @@ if (-not $NoTools) {
     } elseif (Test-Path (Join-Path $repo 'PADDLEOCR')) {
         Copy-Item -LiteralPath (Join-Path $repo 'PADDLEOCR') -Destination $markerDest
     }
+    if ($complete) {
+        if (-not (Test-Path -LiteralPath $markerDest -PathType Leaf)) { throw '完整安装包需要指定 PaddleOcrTag。' }
+        $engineTag = (Get-Content -LiteralPath $markerDest -TotalCount 1).Trim()
+        & (Join-Path $repo 'scripts\stage-ocr.ps1') `
+            -SourceTools $toolSource -DestinationTools $toolDest -PaddleOcrTag $engineTag
+    }
 }
 
 if (-not $NoTools -or $IncludeWhisper) {
     & (Join-Path $repo 'scripts\stage-whisper.ps1') `
-        -SourceTools (Join-Path $repo 'tools') -DestinationTools (Join-Path $stagePath 'tools')
+        -SourceTools $ToolsDir -DestinationTools (Join-Path $stagePath 'tools') `
+        -IncludeTranscriptionModel:$complete -TranscriptionModel $WhisperModel
 }
 
 $background = Join-Path $repo 'background.jpg'
@@ -157,6 +238,13 @@ if ($IncludeProjects) {
 
 Write-Host '[4/4] 汇总...'
 $stageFiles = Get-ChildItem -LiteralPath $stagePath -Recurse -File
+foreach ($file in $stageFiles) {
+    if ($file.Extension -ieq '.json' -and
+        [IO.File]::ReadAllText($file.FullName) -match '"DeepseekApiKey"\s*:\s*"[^"]+') {
+        $relative = [IO.Path]::GetRelativePath($stagePath, $file.FullName)
+        throw "待打包目录包含 DeepSeek 用户密钥：$relative"
+    }
+}
 $stageTotal = ($stageFiles | Measure-Object -Property Length -Sum).Sum
 Write-Host ''
 Write-Host "待打包目录: $stagePath"
@@ -165,7 +253,7 @@ Write-Host "可执行文件: $stageExe"
 Write-Host '用户配置保存在 Local AppData；待打包目录不包含本机配置。'
 
 if (-not $NoTools -and -not ($FullTools -or $Setup)) {
-    Write-Host 'OCR/Whisper 模型未复制；需要完整包时加 -FullTools（-Setup 会自动包含）。'
+    Write-Host 'OCR 模型与 Whisper 转录模型未复制；需要完整包时加 -FullTools（-Setup 会自动包含）。'
 }
 if (-not $IncludeProjects) { Write-Host '本地项目目录未复制；需要时加 -IncludeProjects。' }
 
@@ -188,8 +276,9 @@ if (-not $Variant) {
 }
 
 # 版本号取自 C++ 运行期读取的 setting_data.json，保证安装包文件名与程序内显示一致
-$version = (Get-Content -LiteralPath (Join-Path $source 'resources\setting_data.json') -Raw |
-    ConvertFrom-Json).VERSION
+$releaseSettings = Get-Content -LiteralPath (Join-Path $source 'resources\setting_data.json') -Raw |
+    ConvertFrom-Json
+$version = $releaseSettings.VERSION
 if (-not $version) { throw '无法从 cpp\resources\setting_data.json 读取 VERSION。' }
 
 if (-not $ISCCPath) {
@@ -223,14 +312,44 @@ if (-not $ISCCPath) {
     if ($found) { $ISCCPath = $found.Source }
 }
 if (-not $ISCCPath) { throw '未找到 ISCC.exe，请安装 Inno Setup 6 或显式指定 -ISCCPath。' }
+$innoLicense = Join-Path (Split-Path $ISCCPath -Parent) 'license.txt'
+if (Test-Path -LiteralPath $innoLicense -PathType Leaf) {
+    Copy-Item -LiteralPath $innoLicense -Destination (Join-Path $licenseDir 'Inno-Setup.txt') -Force
+}
 
 Write-Host ''
 Write-Host "生成安装包：版本 $version，变体 $Variant"
-# /DMyRemoveLegacyExe=1 让安装包在覆盖升级时清掉 Python 版残留的旧主程序
+$outputPath = $OutputDir
+if (-not [IO.Path]::IsPathRooted($outputPath)) {
+    $outputPath = Join-Path $repo $outputPath
+}
+$outputPath = [IO.Path]::GetFullPath($outputPath)
 Push-Location $repo
 try {
-    & $ISCCPath "/DMyAppVersion=$version" "/DMyVariant=$Variant" "/DMyAppExeName=$exeName" `
-        "/DMySourceDir=$stagePath" '/DMyRemoveLegacyExe=1' $issName
+    $installerArgs = @("/DMyAppVersion=$version", "/DMyDisplayVersion=$($releaseSettings.DISPLAY_VERSION)", "/DMyVariant=$Variant", "/DMyAppExeName=$exeName", "/DMySourceDir=$stagePath", '/DMyFork=1', "/O$outputPath")
+    if ($ReleaseRepository) { $installerArgs += "/DMyAppURL=https://github.com/$ReleaseRepository" }
+    if ($complete -and $engineTag -match '^PaddleOCR-GPU-(v[0-9.]+)-CUDA-[0-9.]+$') {
+        $cpuRoot = Join-Path $stagePath "tools\PaddleOCR-CPU-$($Matches[1])"
+        $gpuRoot = Join-Path $stagePath "tools\$engineTag"
+        $sharedFiles = 0
+        $entries = foreach ($file in Get-ChildItem -LiteralPath $gpuRoot -Recurse -File) {
+            $relative = $file.FullName.Substring($gpuRoot.Length + 1)
+            $cpuFile = Get-Item -LiteralPath (Join-Path $cpuRoot $relative) -ErrorAction SilentlyContinue
+            $source = $file.FullName
+            if ($cpuFile -and $cpuFile.Length -eq $file.Length -and
+                (Get-FileHash -LiteralPath $cpuFile.FullName).Hash -eq (Get-FileHash -LiteralPath $source).Hash) {
+                $source = $cpuFile.FullName
+                $sharedFiles++
+            }
+            $folder = $file.DirectoryName.Substring($stagePath.Length + 1)
+            'Source: "{0}"; DestDir: "{{app}}\{1}"; Flags: ignoreversion' -f $source, $folder
+        }
+        $include = Join-Path $stagePath '.fkw-ocr-files.iss'
+        $entries | Set-Content -LiteralPath $include -Encoding utf8BOM
+        $installerArgs += "/DMyOcrFiles=$include"
+        Write-Host "安装包中只存储一份 $sharedFiles 个内容相同的 CPU / CUDA OCR 文件。"
+    }
+    & $ISCCPath @installerArgs $issName
     if ($LASTEXITCODE -ne 0) { throw "Inno Setup 编译失败（退出码 $LASTEXITCODE）。" }
 } finally {
     Pop-Location
@@ -238,8 +357,10 @@ try {
 
 # 注意：局部变量不要与上面的参数同名——PowerShell 变量名大小写不敏感，
 # 例如 $setup 会命中 [switch]$Setup，把字符串赋给 [switch] 会抛类型转换错误，故用 $setupPath。
-$setupPath = Join-Path (Join-Path $repo 'Output') "Fairy-Kekkai-Workshop-v$version-$Variant-Windows-x86_64-Setup.exe"
+$setupPath = Join-Path $outputPath "Fairy-Kekkai-Workshop-v$version-$Variant-Windows-x86_64-Setup.exe"
 if (-not (Test-Path $setupPath)) { throw "未找到安装包产物: $setupPath" }
+$size = (Get-Item -LiteralPath $setupPath).Length
+if ($size -ge 2GB) { throw "安装包超过 GitHub Release 的单文件大小限制：$setupPath" }
 Write-Host ''
 Write-Host "安装包: $setupPath"
-Write-Host "体积: $([math]::Round((Get-Item -LiteralPath $setupPath).Length / 1MB, 1)) MB"
+Write-Host "体积: $([math]::Round($size / 1MB, 1)) MB"

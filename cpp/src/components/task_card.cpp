@@ -97,8 +97,15 @@ TaskCard::TaskCard(std::shared_ptr<TaskBase> task, PreviewTaskKind kind, QWidget
     };
     addInfo(qfw::FluentIconEnum::Tag, statusText(status_), false);
     statusLabel_ = qobject_cast<qfw::CaptionLabel*>(finishedInfo_.takeLast());
-    finishedInfo_.takeLast(); // status icon always remains visible
-    if (kind == PreviewTaskKind::FFmpeg) {
+    auto* statusIcon = finishedInfo_.takeLast(); // status icon always remains visible
+    if (kind == PreviewTaskKind::Superres || kind == PreviewTaskKind::Interpolation) {
+        // Keep the source/reuse summary separate from the live work counters.
+        info->removeWidget(statusIcon); info->removeWidget(statusLabel_);
+        auto* stage = new QHBoxLayout;
+        stage->setSpacing(3); stage->addWidget(statusIcon); stage->addWidget(statusLabel_, 1);
+        details->addLayout(stage);
+    }
+    if (kind == PreviewTaskKind::FFmpeg || kind == PreviewTaskKind::Superres || kind == PreviewTaskKind::Interpolation) {
         info->addSpacing(5);
         addInfo(qfw::FluentIconEnum::BookShelf, QStringLiteral("0MB"), true);
         info->addSpacing(5);
@@ -111,6 +118,12 @@ TaskCard::TaskCard(std::shared_ptr<TaskBase> task, PreviewTaskKind kind, QWidget
         timeLabel_ = qobject_cast<qfw::CaptionLabel*>(processingInfo_.at(3));
         bitrateLabel_ = qobject_cast<qfw::CaptionLabel*>(processingInfo_.at(5));
         speedLabel_ = qobject_cast<qfw::CaptionLabel*>(processingInfo_.at(7));
+        if (kind == PreviewTaskKind::Superres || kind == PreviewTaskKind::Interpolation) {
+            const QString prefix = kind == PreviewTaskKind::Interpolation ? "interpolation" : "superres";
+            sizeLabel_->setObjectName(prefix + "TaskFrames"); speedLabel_->setObjectName(prefix + "TaskSpeed"); bitrateLabel_->setObjectName(prefix + "TaskRemaining");
+            sizeLabel_->setToolTip(kind == PreviewTaskKind::Interpolation ? trText("仅统计需要模型计算的新帧，不包含原始帧、静止复用帧和切镜保护帧") : trText("已处理和剩余帧数均按去重后需超分的独特画面统计"));
+            bitrateLabel_->setToolTip(trText("按剩余模型计算量估算，不含最终编码和合成时间"));
+        }
     }
     info->addStretch();
     auto* clock = new qfw::IconWidget(qfw::FluentIcon(qfw::FluentIconEnum::Calendar), this);
@@ -146,6 +159,16 @@ TaskCard::TaskCard(std::shared_ptr<TaskBase> task, PreviewTaskKind kind, QWidget
     QObject::connect(retryButton_, &QToolButton::clicked, this, &TaskCard::retryTask);
     QObject::connect(logButton_, &QToolButton::clicked, this, &TaskCard::showLog);
     QObject::connect(deleteButton_, &QToolButton::clicked, this, &TaskCard::deleteTask);
+    if (kind == PreviewTaskKind::Superres || kind == PreviewTaskKind::Interpolation) {
+        statusLabel_->setWordWrap(true);
+        QObject::connect(&GlobalEventBus::instance(), &GlobalEventBus::taskStageChangedSig,
+                         this, [this](int id, const QString& stage) {
+            if (id != task_->taskId) return;
+            stageText_ = stage;
+            statusLabel_->setText(statusText(status_) + QStringLiteral(" · ") + stage);
+            statusLabel_->setToolTip(stage);
+        });
+    }
     updateStatus(status_);
     updateInfoVisible(false);
 }
@@ -170,7 +193,8 @@ void TaskCard::updateStatus(TaskStatus status) {
     status_ = status;
     QString text = statusText(status);
     // two-pass 阶段文案仅在压制中显示
-    if (status == TaskStatus::Processing && !stageText_.isEmpty())
+    if ((status == TaskStatus::Processing || ((kind_ == PreviewTaskKind::Superres || kind_ == PreviewTaskKind::Interpolation) &&
+         (status == TaskStatus::Failed || status == TaskStatus::Succeeded))) && !stageText_.isEmpty())
         text = text + QStringLiteral(" · ") + stageText_;
     statusLabel_->setText(text);
     switch (status) {
@@ -236,7 +260,12 @@ void TaskCard::updateInfo(const QString& size, double time, const QString& bitra
     sizeLabel_->setText(size);
     timeLabel_->setText(pythonFloat(time) + QStringLiteral("s"));
     bitrateLabel_->setText(bitrate);
-    speedLabel_->setText(pythonFloat(speed) + QStringLiteral("x"));
+    if (kind_ == PreviewTaskKind::Superres || kind_ == PreviewTaskKind::Interpolation) {
+        speedLabel_->setText(stageText_.startsWith(trText("检测相同帧")) || stageText_.startsWith(trText("分析画面")) ? trText("分析中") :
+            bitrate == trText("收尾中") ? (kind_ == PreviewTaskKind::Interpolation ? trText("补帧完成") : trText("超分完成")) :
+            speed > 0 ? QString::number(speed, 'f', 1) + trText(" 帧/秒") : trText("估算中"));
+        speedLabel_->setToolTip(kind_ == PreviewTaskKind::Interpolation ? trText("最近约 8 秒模型实际生成的新帧，不包含直接复用帧和分析时间") : trText("最近约 8 秒实际超分的独特帧数，不包含复用帧和开始前的分析时间"));
+    } else speedLabel_->setText(pythonFloat(speed) + QStringLiteral("x"));
 }
 
 void TaskCard::updateInfoVisible(bool visible) {

@@ -43,17 +43,26 @@ QJsonValue dynamicDefault(const QString& group, const QString& key) {
         if (key == QStringLiteral("VideocrCliPath"))
             return QDir(sourceRoot()).filePath(QStringLiteral("tools/videocr-cli") + executable);
         if (key == QStringLiteral("PaddleocrPath")) return paddleOcrDefaultPath();
+        if (key == QStringLiteral("CpuPaddleocrPath")) return paddleOcrCpuDefaultPath();
+        if (key == QStringLiteral("GpuPaddleocrPath")) return paddleOcrGpuDefaultPath();
+        if (key == QStringLiteral("UseGpu")) return !isPaddleOcrCpu();
         if (key == QStringLiteral("supportFilesPath"))
             return paddleOcrSupportFilesDefaultPath();
         if (key == QStringLiteral("TempDir"))
-            return QDir(sourceRoot()).filePath(QStringLiteral("temp"));
+            return QDir(userDataFolder()).filePath(QStringLiteral("ocr-temp"));
     }
     if (group == QStringLiteral("Whisper")) {
         if (key == QStringLiteral("ModelPath")) {
             const QString legacy = QDir(sourceRoot()).filePath(
                 QStringLiteral("tools/Whisper.model/ggml-model-whisper-small.bin"));
-            return QFileInfo::exists(legacy) ? legacy : QDir(sourceRoot()).filePath(
-                QStringLiteral("tools/Whisper.model/ggml-small.bin"));
+            const QDir models(QDir(sourceRoot()).filePath(QStringLiteral("tools/Whisper.model")));
+            const QString small = models.filePath(QStringLiteral("ggml-small.bin"));
+            const QString base = models.filePath(QStringLiteral("ggml-base.bin"));
+            const QString quantizedBase = models.filePath(QStringLiteral("ggml-base-q5_1.bin"));
+            if (QFileInfo::exists(legacy)) return legacy;
+            if (QFileInfo::exists(small)) return small;
+            if (QFileInfo::exists(base)) return base;
+            return QFileInfo::exists(quantizedBase) ? quantizedBase : small;
         }
         if (key == QStringLiteral("CliPath"))
             return QDir(sourceRoot()).filePath(QStringLiteral("tools/whisper/whisper-cli") + executable);

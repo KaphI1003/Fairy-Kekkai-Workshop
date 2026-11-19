@@ -1,13 +1,12 @@
 name: Release (C++ Windows Installer)
 
-# C++ 原生版唯一的发布管线：打 tag（v3.0.0 形式）即自动完成
-#   预检（版本号 / 发布说明契约）-> 四变体并行构建 -> 校验产物 -> 发布 GitHub Release。
+# C++ 原生版发布管线。推送 v3.1.0-ex 形式的 tag 后构建四个变体并创建 GitHub Release 草稿。
 # Python 版的两条旧管线（release.yml / deploy-windows.yml）已下线，不再存在。
 #
 # 也可以 workflow_dispatch 手工触发：只构建并上传 artifact，不会发布 Release。
 #
 # 发布前需要满足的契约（细节见 DEVELOPMENT.md「发布与更新约定」）：
-#   1. tag 版本号 == cpp/resources/setting_data.json 的 VERSION；
+#   1. tag 去掉 v 前缀和可选的 -ex 后缀后应等于 cpp/resources/setting_data.json 的 VERSION；
 #   2. RELEASE_NOTES.md 含 `## 更新日志`（后面还有别的 `## ` 标题）与 `## 下载提示`，
 #      下载提示里 CPU / GPU CUDA 11.8 / GPU CUDA 12.9 / Clear 四个安装包链接齐全；
 #   3. 若本次更换了 OCR 引擎，正文末尾必须独占一行 !OCRUPDATE!。
@@ -33,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      display_version: ${{ steps.version.outputs.display_version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -49,13 +49,20 @@ jobs:
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          DISPLAY_VERSION=$(python3 -c "import json; print(json.load(open('cpp/resources/setting_data.json', encoding='utf-8-sig'))['DISPLAY_VERSION'])")
+          echo "display_version=$DISPLAY_VERSION" >> "$GITHUB_OUTPUT"
           echo "C++ 版版本号: $VERSION"
+
+      - name: Verify OCR component staging
+        shell: pwsh
+        run: ./cpp/tests/stage_ocr_tests.ps1
 
       - name: Verify tag matches version
         # 防止 tag 与源码里的版本号不一致，导致发布出的安装包版本错乱
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
+          TAG_VERSION="${TAG_VERSION%-ex}"
           if [ "$TAG_VERSION" != "${{ steps.version.outputs.version }}" ]; then
             echo "::error::tag $GITHUB_REF_NAME 与 cpp/resources/setting_data.json 的 VERSION（${{ steps.version.outputs.version }}）不一致，请先改版本号再打 tag"
             exit 1
@@ -70,6 +77,7 @@ jobs:
         run: |
           python3 scripts/check-release-notes.py \
             --version "${{ steps.version.outputs.version }}" \
+            --repo "$GITHUB_REPOSITORY" \
             --check-ocr-update
 
   build:
@@ -169,10 +177,10 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .ci-cache/inno-languages
-          key: windows-inno-languages-${{ env.DEPENDENCY_CACHE_REVISION }}-${{ env.ROLLING_CACHE_WEEK }}
+          key: windows-inno-6.7.4-languages-${{ env.DEPENDENCY_CACHE_REVISION }}-${{ env.ROLLING_CACHE_WEEK }}
 
       - name: Install Inno Setup
-        run: choco install innosetup -y --no-progress
+        run: choco install innosetup --version=6.7.4 -y --no-progress
 
       - name: Download Inno Setup translations
         if: steps.cache-inno-languages.outputs.cache-hit != 'true'
@@ -185,13 +193,13 @@ jobs:
           New-Item -ItemType Directory -Force -Path $langDir | Out-Null
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-          $files = Invoke-RestMethod "https://api.github.com/repos/jrsoftware/issrc/contents/Files/Languages"
+          $files = Invoke-RestMethod "https://api.github.com/repos/jrsoftware/issrc/contents/Files/Languages?ref=is-6_7_4"
           $islFiles = $files | Where-Object { $_.type -eq "file" -and $_.name -like "*.isl" }
           foreach ($f in $islFiles) {
             curl.exe -L -s -o (Join-Path $langDir $f.name) $f.download_url
           }
 
-          $unofficial = Invoke-RestMethod "https://api.github.com/repos/jrsoftware/issrc/contents/Files/Languages/Unofficial"
+          $unofficial = Invoke-RestMethod "https://api.github.com/repos/jrsoftware/issrc/contents/Files/Languages/Unofficial?ref=is-6_7_4"
           $existing = @($islFiles.name)
           foreach ($f in $unofficial | Where-Object { $_.type -eq "file" -and $_.name -like "*.isl" }) {
             if ($f.name -notin $existing) {
@@ -258,6 +266,29 @@ jobs:
           }
           Write-Host "PaddleOCR engine installed at $target"
 
+      - name: Cache CPU fallback for GPU installers
+        if: startsWith(matrix.variant, 'GPU-')
+        id: cache-cpu-fallback
+        uses: actions/cache/restore@v4
+        with:
+          path: tools/PaddleOCR-CPU-v3.7.0
+          key: windows-paddle-PaddleOCR-CPU-v3.7.0-${{ env.DEPENDENCY_CACHE_REVISION }}
+
+      - name: Download CPU fallback for GPU installers
+        if: startsWith(matrix.variant, 'GPU-') && steps.cache-cpu-fallback.outputs.cache-hit != 'true'
+        run: |
+          New-Item -ItemType Directory -Force -Path downloads, tools | Out-Null
+          $archive = 'downloads\PaddleOCR-CPU-v3.7.0.7z'
+          curl.exe -L --fail --retry 3 -o $archive "$env:PADDLEOCR_BASE_URL/PaddleOCR-CPU-v3.7.0.7z"
+          if ($LASTEXITCODE -ne 0) { throw 'CPU OCR 引擎下载失败' }
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne 'a1b597f5620d1a86cec606b50908a12fc1b215adf6807be5538b7ca6bddc9d20') {
+            throw 'CPU OCR 引擎 SHA256 不匹配'
+          }
+          & 'C:\Program Files\7-Zip\7z.exe' x $archive '-otools' -y | Out-Null
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path 'tools\PaddleOCR-CPU-v3.7.0\paddleocr.exe')) {
+            throw 'CPU OCR 引擎解压失败'
+          }
+
       - name: Cache PaddleOCR support files
         if: env.PADDLEOCR_TAG != ''
         id: cache-support
@@ -320,94 +351,20 @@ jobs:
             throw 'Silero VAD 模型 SHA256 不匹配'
           }
 
-      - name: Cache videocr-cli
+      - name: Set up Python for VideOCR
         if: env.PADDLEOCR_TAG != ''
-        id: cache-videocr
-        uses: actions/cache/restore@v4
+        uses: actions/setup-python@v5
         with:
-          path: tools/videocr-cli.exe
-          key: windows-videocr-cli-v2.0.0-${{ env.DEPENDENCY_CACHE_REVISION }}
+          python-version: '3.11'
 
-      - name: Download videocr-cli
-        if: env.PADDLEOCR_TAG != '' && steps.cache-videocr.outputs.cache-hit != 'true'
-        run: |
-          New-Item -ItemType Directory -Force -Path downloads, tools | Out-Null
-          curl.exe -L --fail --retry 3 -o downloads\videocr-cli.zip "$env:TOOLS_BASE_URL/videocr-cli.zip"
-          if ($LASTEXITCODE -ne 0) { throw 'videocr-cli 下载失败' }
-          Expand-Archive downloads\videocr-cli.zip -DestinationPath downloads\videocr -Force
-          $videocr = Get-ChildItem downloads\videocr -Recurse -File -Filter videocr-cli.exe | Select-Object -First 1
-          if (-not $videocr) { throw 'videocr-cli.zip 中未找到 videocr-cli.exe' }
-          Copy-Item -LiteralPath $videocr.FullName -Destination tools\videocr-cli.exe -Force
-
-      - name: Cache ffmpeg and yt-dlp
+      - name: Build VideOCR and prepare pinned runtime tools
         if: env.PADDLEOCR_TAG != ''
-        id: cache-download-tools
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            tools/ffmpeg.exe
-            tools/yt-dlp.exe
-          key: windows-download-tools-${{ env.DEPENDENCY_CACHE_REVISION }}-${{ env.ROLLING_CACHE_WEEK }}
-
-      - name: Download ffmpeg and yt-dlp
-        # ffmpeg 优先从 gyan.dev 获取（GitHub Actions 数据中心可能被 Cloudflare 拦截，
-        # 失败时自动重试并回退到 BtbN 的 GitHub Release 镜像）；yt-dlp 从其官方 Release 获取
-        if: env.PADDLEOCR_TAG != '' && steps.cache-download-tools.outputs.cache-hit != 'true'
         run: |
-          New-Item -ItemType Directory -Force -Path tools | Out-Null
+          python -m pip install -r scripts/videocr-release-requirements.txt
+          if ($LASTEXITCODE) { throw 'VideOCR dependency install failed' }
+          $model = if ($env:PADDLEOCR_TAG -like '*GPU*') { 'ggml-base-q5_1.bin' } else { 'ggml-small.bin' }
+          ./scripts/prepare-release-tools.ps1 -ToolsDir tools -NoticesDir downloads/release-notices -Python (Get-Command python).Source -WhisperModel $model
 
-          function Download-WithRetry {
-              param(
-                  [string]$Url,
-                  [string]$OutFile,
-                  [int]$Attempts = 3,
-                  [int]$MinBytes = 1MB
-              )
-              for ($i = 1; $i -le $Attempts; $i++) {
-                  Write-Host "[$i/$Attempts] Downloading $Url"
-                  curl.exe -L --fail -o $OutFile $Url
-                  if (Test-Path $OutFile) {
-                      $size = (Get-Item $OutFile).Length
-                      if ($size -ge $MinBytes) {
-                          Write-Host "OK: $([math]::Round($size / 1MB, 1)) MB"
-                          return $true
-                      }
-                      Write-Host "File too small ($size bytes), likely an error page; retrying..."
-                      Remove-Item $OutFile -Force -ErrorAction SilentlyContinue
-                  }
-                  Start-Sleep -Seconds 5
-              }
-              Write-Host "FAILED: $Url"
-              return $false
-          }
-
-          $ffmpegOk = $false
-          foreach ($src in @(
-              "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
-              "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
-          )) {
-              if (Download-WithRetry -Url $src -OutFile ffmpeg.zip -MinBytes 10MB) {
-                  $ffmpegOk = $true
-                  break
-              }
-          }
-          if (-not $ffmpegOk) {
-              Write-Error "ffmpeg 下载失败：gyan.dev 与 BtbN 镜像均不可用"
-              exit 1
-          }
-          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-extracted -Force
-          $ff = Get-ChildItem ffmpeg-extracted -Recurse -Filter ffmpeg.exe | Select-Object -First 1
-          if (-not $ff) { Write-Error 'ffmpeg 压缩包中未找到 ffmpeg.exe'; exit 1 }
-          Copy-Item $ff.FullName tools\ffmpeg.exe -Force
-          Remove-Item ffmpeg.zip, ffmpeg-extracted -Recurse -Force
-
-          if (-not (Download-WithRetry -Url "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" -OutFile tools\yt-dlp.exe -MinBytes 5MB)) {
-              Write-Error "yt-dlp 下载失败"
-              exit 1
-          }
-          Write-Host "tools: $((Get-ChildItem tools -Force | ForEach-Object { $_.Name }) -join ', ')"
-
-      # 依赖下载完成即保存，后续编译失败也不必重新下载。
       - name: Save Inno Setup translations cache
         if: steps.cache-inno-languages.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -432,6 +389,13 @@ jobs:
             tools/${{ env.PADDLEOCR_TAG }}
           key: ${{ steps.cache-paddle.outputs.cache-primary-key }}
 
+      - name: Save CPU fallback cache
+        if: startsWith(matrix.variant, 'GPU-') && steps.cache-cpu-fallback.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: tools/PaddleOCR-CPU-v3.7.0
+          key: ${{ steps.cache-cpu-fallback.outputs.cache-primary-key }}
+
       - name: Save PaddleOCR support files cache
         if: env.PADDLEOCR_TAG != '' && steps.cache-support.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -449,22 +413,31 @@ jobs:
             tools/Whisper.model/ggml-silero-v6.2.0.bin
           key: ${{ steps.cache-whisper.outputs.cache-primary-key }}
 
-      - name: Save videocr-cli cache
-        if: env.PADDLEOCR_TAG != '' && steps.cache-videocr.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+      - name: Cache super-resolution engine
+        if: env.PADDLEOCR_TAG != ''
+        uses: actions/cache@v4
         with:
-          path: |
-            tools/videocr-cli.exe
-          key: ${{ steps.cache-videocr.outputs.cache-primary-key }}
+          path: tools/realesrgan
+          key: windows-superres-memory-v2-${{ hashFiles('cpp/superres_engine/**', 'cpp/video_frames/**', 'third_party/realesrgan-ncnn-vulkan/**', 'scripts/build-superres-worker.ps1', 'scripts/stage-superres.ps1') }}
 
-      - name: Save ffmpeg and yt-dlp cache
-        if: env.PADDLEOCR_TAG != '' && steps.cache-download-tools.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+      - name: Prepare super-resolution engine
+        if: env.PADDLEOCR_TAG != ''
+        run: |
+          ./scripts/stage-superres.ps1 -SourceTools tools -DestinationTools tools -Download
+
+      - name: Cache frame-interpolation engine
+        if: env.PADDLEOCR_TAG != ''
+        uses: actions/cache@v4
         with:
-          path: |
-            tools/ffmpeg.exe
-            tools/yt-dlp.exe
-          key: ${{ steps.cache-download-tools.outputs.cache-primary-key }}
+          path: tools/rife
+          key: windows-rife-memory-v2-${{ hashFiles('cpp/engine/**', 'cpp/video_frames/**', 'third_party/rife-ncnn-vulkan/**', 'third_party/realesrgan-ncnn-vulkan/stb_image_write.h', 'scripts/build-rife-bridge.ps1', 'scripts/stage-interpolation.ps1') }}
+
+      - name: Prepare frame-interpolation engine
+        if: env.PADDLEOCR_TAG != ''
+        run: |
+          if (-not (Test-Path tools/rife/fkw-rife-bridge.exe)) {
+            ./scripts/stage-interpolation.ps1 -SourceTools tools -DestinationTools tools -Download
+          }
 
       - name: Build Release and create installer
         # 编译与打包都由 package-cpp-release.ps1 完成：
@@ -476,15 +449,18 @@ jobs:
             '-OpenCVDir', $env:OPENCV_DIR,
             '-Generator', $env:CMAKE_GENERATOR,
             '-CompilerLauncher', $env:SCCACHE_PATH,
+            '-ReleaseRepository', $env:GITHUB_REPOSITORY,
             '-Setup'
           )
           if ("${{ matrix.variant }}" -eq 'Clear') {
             # Clear 升级主程序与 Whisper/VAD，保留用户现有 OCR 引擎与标识
             $params += @('-NoTools', '-IncludeWhisper', '-Variant', 'Clear')
           } else {
-            $params += @('-PaddleOcrTag', $env:PADDLEOCR_TAG)
+            $model = if ($env:PADDLEOCR_TAG -like '*GPU*') { 'ggml-base-q5_1.bin' } else { 'ggml-small.bin' }
+            $params += @('-PaddleOcrTag', $env:PADDLEOCR_TAG, '-ThirdPartyNoticesDir', 'downloads/release-notices', '-WhisperModel', $model)
           }
-          & powershell.exe @params
+          if ("${{ matrix.variant }}" -eq 'CPU-v3.7.0') { $params += '-BuildTests' }
+          & pwsh.exe @params
           if ($LASTEXITCODE -ne 0) { Write-Error 'C++ 打包失败'; exit 1 }
 
       - name: Verify installer and staged payload
@@ -520,14 +496,14 @@ jobs:
             'whisper\ggml-base.dll', 'whisper\ggml-cpu.dll', 'whisper\ggml-vulkan.dll',
             'Whisper.model\ggml-silero-v6.2.0.bin'
           )
+          if ($variant -ne 'Clear') {
+            $model = if ($variant -like '*GPU*') { 'ggml-base-q5_1.bin' } else { 'ggml-small.bin' }
+            $whisperPayload += "Whisper.model\$model", 'whisper-cpu\whisper-cli.exe'
+          }
           foreach ($relative in $whisperPayload) {
             if (-not (Test-Path (Join-Path $tools $relative) -PathType Leaf)) {
               throw "待打包目录缺少 tools\$relative"
             }
-          }
-          $vadFiles = @(Get-ChildItem (Join-Path $tools 'Whisper.model') -File -Recurse)
-          if ($vadFiles.Count -ne 1 -or $vadFiles[0].Name -ne 'ggml-silero-v6.2.0.bin') {
-            throw 'Whisper.model 只应收录 Silero VAD，不能打入大型转录模型'
           }
           if ($variant -eq 'Clear') {
             if (Test-Path $marker) { Write-Error 'Clear 增量包不应携带 PADDLEOCR 标识文件'; exit 1 }
@@ -545,12 +521,15 @@ jobs:
               exit 1
             }
             foreach ($item in @("tools\$expected", "tools\$env:SUPPORT_DIR",
-                                'tools\videocr-cli.exe', 'tools\ffmpeg.exe', 'tools\yt-dlp.exe')) {
+                                'tools\videocr-cli.exe', 'tools\ffmpeg.exe', 'tools\ffprobe.exe', 'tools\yt-dlp.exe', 'tools\deno.exe')) {
               if (-not (Test-Path (Join-Path $stage $item))) {
                 Write-Error "待打包目录缺少 $item"; exit 1
               }
             }
-            Write-Host "PADDLEOCR 标识校验通过：$first"
+            if (-not (Test-Path (Join-Path $stage 'tools\PaddleOCR-CPU-v3.7.0\paddleocr.exe'))) {
+              throw '所有完整安装包都必须包含 CPU OCR 引擎'
+            }
+            Write-Host "PADDLEOCR 标识与 CPU 引擎校验通过：$first"
           }
 
       - name: Report compiler cache statistics
@@ -577,6 +556,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Download all installers
         uses: actions/download-artifact@v4
@@ -620,14 +601,31 @@ jobs:
           fi
           ls -lh release-assets
 
+      - name: Archive matching Workshop source
+        run: python3 scripts/package-release-source.py release-assets/Fairy-Kekkai-Workshop-source.zip
+
+      - name: Set release download links to this repository
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+          notes = Path('RELEASE_NOTES.md').read_text(encoding='utf-8')
+          base = 'https://github.com/' + os.environ['GITHUB_REPOSITORY'] + '/releases/download/' + os.environ['GITHUB_REF_NAME'] + '/'
+          notes = re.sub(r'https://github\.com/Fairy-Oracle-Sanctuary/Fairy-Kekkai-Workshop/releases/download/v[\d.]+/', base, notes)
+          Path('fork-release-notes.md').write_text(notes, encoding='utf-8')
+          PY
+
       - name: Create GitHub Release
         # 正文即 RELEASE_NOTES.md，客户端「检查更新」直接解析它；
         # 预检已确认它满足契约，这里再传一次是为了防止构建期间文件被改动
         uses: softprops/action-gh-release@v2
         with:
-          name: Fairy Kekkai Workshop ${{ github.ref_name }}
-          body_path: RELEASE_NOTES.md
-          files: release-assets/*-Setup.exe
-          draft: false
+          name: Fairy Kekkai Workshop ASS 适配功能增强版 · ${{ needs.preflight.outputs.display_version }}
+          body_path: fork-release-notes.md
+          files: |
+            release-assets/*-Setup.exe
+            release-assets/Fairy-Kekkai-Workshop-source.zip
+          draft: true
           prerelease: false
           fail_on_unmatched_files: true

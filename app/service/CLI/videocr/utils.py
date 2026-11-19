@@ -14,8 +14,15 @@ from typing import IO, Any
 
 import av
 import fast_ssim
+import numpy as np
 import simplejpeg
-from cpuid import cpuid, xgetbv  # type: ignore
+from scipy import ndimage
+
+try:
+    from cpuid import cpuid, xgetbv  # type: ignore
+except ImportError:  # pragma: no cover - optional build dependency
+    cpuid = None
+    xgetbv = None
 
 from .lang_dictionaries import PADDLEOCR_LANGS
 from .models import PredictedText
@@ -151,6 +158,114 @@ def get_srt_timestamp_from_ms(ms: float) -> str:
     return f'{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}'
 
 
+def _load_rgb_image(path: str) -> np.ndarray:
+    with open(path, 'rb') as handle:
+        data, height, width, _ = simplejpeg.decode_jpeg(
+            handle.read(), colorspace='RGB', output='bytes'
+        )
+    return np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3)
+
+
+def _union_box(boxes: list[list[list[float]]]) -> tuple[int, int, int, int] | None:
+    xs: list[float] = []
+    ys: list[float] = []
+    for box in boxes:
+        for point in box:
+            xs.append(float(point[0]))
+            ys.append(float(point[1]))
+    if not xs or not ys:
+        return None
+    return int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))
+
+
+_EIGHT_CONNECTED = np.ones((3, 3), dtype=bool)
+
+
+def _component_stats(
+    mask: np.ndarray, edges: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Label 8-connected components and return (labels, areas, border, density).
+
+    ``border[i]`` is True when component ``i`` touches the crop edge and
+    ``density[i]`` is the mean edge-map value over that component.  Labels 0
+    (background) are excluded from the returned statistics.
+    """
+    labels, count = ndimage.label(mask, structure=_EIGHT_CONNECTED)
+    if count == 0:
+        return (
+            labels,
+            np.zeros(0, dtype=np.int64),
+            np.zeros(0, dtype=bool),
+            np.zeros(0, dtype=np.float64),
+        )
+
+    flat = labels.ravel()
+    areas = np.bincount(flat, minlength=count + 1)[1:].astype(np.int64)
+    edge_sums = np.bincount(
+        flat, weights=edges.ravel(), minlength=count + 1
+    )[1:].astype(np.float64)
+    density = edge_sums / np.maximum(areas, 1)
+
+    border_ids = np.unique(
+        np.concatenate((labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1]))
+    )
+    border = np.zeros(count + 1, dtype=bool)
+    border[border_ids[border_ids > 0]] = True
+    return labels, areas, border[1:], density
+
+
+def _dilate(mask: np.ndarray, iterations: int = 1) -> np.ndarray:
+    out = mask
+    for _ in range(iterations):
+        padded = np.pad(out, 1)
+        out = (
+            padded[1:-1, 1:-1] | padded[:-2, 1:-1] | padded[2:, 1:-1]
+            | padded[1:-1, :-2] | padded[1:-1, 2:]
+            | padded[:-2, :-2] | padded[:-2, 2:]
+            | padded[2:, :-2] | padded[2:, 2:]
+        )
+    return out
+
+
+def _erode(mask: np.ndarray, iterations: int = 1) -> np.ndarray:
+    out = mask
+    for _ in range(iterations):
+        padded = np.pad(out, 1)
+        out = (
+            padded[1:-1, 1:-1] & padded[:-2, 1:-1] & padded[2:, 1:-1]
+            & padded[1:-1, :-2] & padded[1:-1, 2:]
+        )
+    return out
+
+
+def _fill_holes(mask: np.ndarray) -> np.ndarray:
+    """Fill non-mask regions that are not reachable from the crop border."""
+    # binary_fill_holes uses the same 4-connected flood fill from the border
+    # as the previous Python implementation, in C.
+    return ndimage.binary_fill_holes(mask)
+
+
+def _edge_map(gray: np.ndarray) -> np.ndarray:
+    dx = np.zeros_like(gray)
+    dy = np.zeros_like(gray)
+    dx[:, 1:] = np.abs(np.diff(gray, axis=1))
+    dy[1:, :] = np.abs(np.diff(gray, axis=0))
+    magnitude = dx + dy
+    threshold = max(0.06, float(np.percentile(magnitude, 85)) * 0.6)
+    return magnitude >= threshold
+
+
+def detect_subtitle_colors(
+    image_path: str, boxes: list[list[list[float]]]
+) -> tuple[tuple[int, int, int], tuple[int, int, int], float]:
+    """Compatibility API; unknown components carry zero confidence."""
+    from .color_styles import estimate_colors
+
+    observation = estimate_colors(_load_rgb_image(image_path), boxes)
+    return (observation.fill or (255, 255, 255),
+            observation.outline or (0, 0, 0), observation.confidence)
+
+
 def is_on_same_line(word1: PredictedText, word2: PredictedText) -> bool:
     """Checks if two words are on the same line based on vertical overlap."""
     y_min1 = min(p[1] for p in word1.bounding_box)
@@ -192,6 +307,171 @@ def extract_non_chinese_segments(text: str) -> list[tuple[str, str]]:
         segments.append(('non_chinese', current_segment))
 
     return segments
+
+
+def _parse_ass_color(value: str) -> tuple[int, int, int] | None:
+    text = value.strip().rstrip('&')
+    if text.startswith('&H') or text.startswith('&h'):
+        text = text[2:]
+    text = text.lstrip('Hh')
+    try:
+        packed = int(text, 16)
+    except ValueError:
+        return None
+    return (packed >> 16) & 0xFF, (packed >> 8) & 0xFF, packed & 0xFF
+
+
+def _parse_ass_time(value: str) -> int:
+    hours, minutes, rest = value.strip().split(':')
+    seconds, centiseconds = rest.split('.')
+    return (
+        (int(hours) * 60 + int(minutes)) * 60 + int(seconds)
+    ) * 1000 + int(centiseconds) * 10
+
+
+def _ass_plain_text(value: str) -> str:
+    return re.sub(r'\{[^}]*\}', '', value).replace('\\N', ' ').strip()
+
+
+def parse_ass_events(text: str) -> list[dict]:
+    """Parse ASS styles and dialogue events, keeping fill/outline colors."""
+    style_fields: list[str] = []
+    styles: dict[str, dict] = {}
+    event_fields: list[str] = []
+    events: list[dict] = []
+    section = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith('['):
+            section = line.lower()
+            continue
+        if 'styles' in section:
+            if line.startswith('Format:'):
+                style_fields = [item.strip().lower() for item in line[7:].split(',')]
+                continue
+            if line.startswith('Style:') and style_fields:
+                parts = line[6:].split(',', len(style_fields) - 1)
+                data = dict(zip(style_fields, parts))
+                name = data.get('name', '').strip()
+                fill = _parse_ass_color(data.get('primarycolour', ''))
+                outline = _parse_ass_color(data.get('outlinecolour', ''))
+                if name and fill and outline:
+                    styles[name] = {"fill": fill, "outline": outline}
+            continue
+        if 'events' in section:
+            if line.startswith('Format:'):
+                event_fields = [item.strip().lower() for item in line[7:].split(',')]
+                continue
+            if line.startswith('Dialogue:') and event_fields:
+                parts = line[9:].split(',', len(event_fields) - 1)
+                data = dict(zip(event_fields, parts))
+                style_name = data.get('style', '').strip()
+                style = styles.get(style_name)
+                if not style:
+                    continue
+                try:
+                    start_ms = _parse_ass_time(data.get('start', ''))
+                    end_ms = _parse_ass_time(data.get('end', ''))
+                except (ValueError, TypeError):
+                    continue
+                text_value = _ass_plain_text(data.get('text', ''))
+                if text_value and end_ms > start_ms:
+                    events.append(
+                        {
+                            "start_ms": start_ms,
+                            "end_ms": end_ms,
+                            "text": text_value,
+                            "fill": style["fill"],
+                            "outline": style["outline"],
+                        }
+                    )
+    return events
+
+
+def _find_ffmpeg() -> str | None:
+    env = os.environ.get("FKW_FFMPEG")
+    if env and os.path.isfile(env):
+        return env
+    candidates = [
+        os.path.join(os.getcwd(), "ffmpeg.exe"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg.exe"),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return shutil.which("ffmpeg")
+
+
+def extract_soft_subtitle_events(video_path: str) -> list[dict]:
+    """Extract the first text subtitle stream as ASS and parse its styles."""
+    ffmpeg = _find_ffmpeg()
+    if not ffmpeg:
+        return []
+    handle, target = tempfile.mkstemp(prefix="fkw-soft-subs-", suffix=".ass")
+    os.close(handle)
+    try:
+        result = subprocess.run(
+            [
+                ffmpeg,
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                video_path,
+                "-map",
+                "0:s:0",
+                "-c:s",
+                "ass",
+                target,
+            ],
+            capture_output=True,
+            timeout=60,
+        )
+        if result.returncode != 0 or not os.path.isfile(target):
+            return []
+        with open(target, encoding="utf-8-sig", errors="replace") as stream:
+            return parse_ass_events(stream.read())
+    except (OSError, subprocess.SubprocessError):
+        return []
+    finally:
+        try:
+            os.unlink(target)
+        except OSError:
+            pass
+
+
+def _normalize_subtitle_text(value: str) -> str:
+    return re.sub(r'[\s、。！？…「」『』・,.!?\-]', '', value)
+
+
+def match_soft_event(
+    events: list[dict], start_ms: int, end_ms: int, text: str
+) -> dict | None:
+    """Find a soft-subtitle event with enough time overlap and text similarity."""
+    if not events:
+        return None
+    normalized = _normalize_subtitle_text(text)
+    duration = max(1, end_ms - start_ms)
+    best = None
+    best_score = -1.0
+    for event in events:
+        overlap = min(end_ms, event["end_ms"]) - max(start_ms, event["start_ms"])
+        if overlap <= 0:
+            continue
+        ratio = levenshtein_ratio(
+            normalized, _normalize_subtitle_text(event["text"])
+        )
+        if ratio < 30 and overlap / duration < 0.7:
+            continue
+        score = overlap + ratio * 10.0
+        if score > best_score:
+            best = event
+            best_score = score
+    return best
 
 
 def find_executable(program_name: str) -> str:
@@ -260,6 +540,17 @@ def perform_hardware_check(paddleocr_path: str, use_gpu: bool) -> None:
     warning_prefix = "Hardware Check Warning:"
 
     def has_avx() -> bool:
+        if cpuid is None or xgetbv is None:
+            if sys.platform == "win32":
+                import ctypes
+
+                # PF_AVX_INSTRUCTIONS_AVAILABLE = 39
+                return bool(ctypes.windll.kernel32.IsProcessorFeaturePresent(39))
+            try:
+                with open("/proc/cpuinfo", encoding="utf-8") as handle:
+                    return " avx " in handle.read()
+            except OSError:
+                return False
         # CPUID leaf 1: Check AVX and OSXSAVE flags
         _, _, ecx, _ = cpuid(1)
         osxsave = bool(ecx & (1 << 27))

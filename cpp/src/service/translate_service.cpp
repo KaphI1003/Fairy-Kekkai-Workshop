@@ -1,7 +1,6 @@
 #include "service/translate_service.h"
 
 #include <QEventLoop>
-#include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -11,6 +10,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QTimer>
 #include <QUrl>
 #include <QVariant>
@@ -24,6 +24,7 @@
 #include "common/task_status.h"
 #include "common/text.h"
 #include "common/text_format.h"
+#include "service/subtitle_translation.h"
 
 namespace fkw {
 namespace {
@@ -268,31 +269,6 @@ QString sanitizeText(const QString& text) {
 
 }  // namespace
 
-QList<SrtItem> parseSrt(const QString& content) {
-    QList<SrtItem> items;
-    static const QRegularExpression separator(QStringLiteral("\\n\\s*\\n"));
-    const QStringList blocks =
-        content.trimmed().split(separator, Qt::SkipEmptyParts);
-    for (const QString& rawBlock : blocks) {
-        const QStringList lines = rawBlock.trimmed().split(QLatin1Char('\n'));
-        if (lines.size() < 3) continue;
-        SrtItem item;
-        item.index = lines.at(0).trimmed();
-        item.time = lines.at(1).trimmed();
-        item.text = lines.mid(2).join(QLatin1Char('\n')).trimmed();
-        items.append(item);
-    }
-    return items;
-}
-
-QString assembleSrt(const QList<SrtItem>& items) {
-    QStringList blocks;
-    blocks.reserve(items.size());
-    for (const SrtItem& item : items)
-        blocks << item.index + QLatin1Char('\n') + item.time + QLatin1Char('\n') + item.text;
-    return blocks.join(QStringLiteral("\n\n"));
-}
-
 QString removeThinkingContent(const QString& text) {
     static const QRegularExpression thinking(
         QStringLiteral("<thinking>.*?</thinking>"),
@@ -365,8 +341,8 @@ bool resolveProvider(const QString& ai, QString* error, TranslateProvider* provi
     return true;
 }
 
-TranslateTask::TranslateTask(const QString& srtPath, const QString& outputPath)
-    : TaskBase(srtPath, outputPath) {}
+TranslateTask::TranslateTask(const QString& subtitlePath, const QString& outputPath)
+    : TaskBase(subtitlePath, outputPath) {}
 
 TranslateWorker::TranslateWorker(std::shared_ptr<TranslateTask> task)
     : TaskWorker(nullptr), task_(std::move(task)) {}
@@ -397,6 +373,15 @@ void TranslateWorker::run() {
 
 bool TranslateWorker::translate() {
     const auto& t = Text::instance();
+    const bool isAss = subtitleFormatForPath(task_->inputPath) == SubtitleFormat::Ass;
+    const auto assCues = isAss ? parseAss(task_->rawContent) : QList<AssCue>{};
+    auto srtItems = isAss ? QList<SrtItem>{} : parseSrt(task_->rawContent);
+    const qsizetype itemCount = isAss ? assCues.size() : srtItems.size();
+    if (isAss && itemCount == 0) {
+        taskLogger_->error(QStringLiteral("ASS 字幕中没有可翻译的对白: ") + task_->inputPath);
+        return false;
+    }
+    QStringList assTranslations(assCues.size());
 
     TranslateProvider provider;
     QString providerError;
@@ -418,38 +403,41 @@ bool TranslateWorker::translate() {
         task_->taskId, 0, QVariant(int(TaskStatus::Processing)), QString(), 0.0,
         QString(), 0.0);
 
-    // 解析 SRT 文件
-    QList<SrtItem> items = parseSrt(task_->rawContent);
-
     // 构建系统提示（content 占位防止用户自定义模板含 {content} 时报错）
-    const QString systemPrompt = formatText(
+    QString systemPrompt = formatText(
         stringValue(ConfigKeys::promptTemplate), {},
         {{QStringLiteral("origin_lang"), task_->originLang},
          {QStringLiteral("target_lang"), task_->targetLang},
          {QStringLiteral("content"), QString()}});
+    if (isAss) {
+        systemPrompt += QStringLiteral(
+            "\n每句里的 [[ASS1]]、[[ASS2]] 等标记代表字幕格式。照原样保留每个标记，"
+            "不得删除、添加、重复或改变顺序。翻译标记周围的文字；不要额外加入字幕标签或换行。");
+    }
     QJsonArray messages;
     messages.append(QJsonObject{{QStringLiteral("role"), QStringLiteral("system")},
                                 {QStringLiteral("content"), systemPrompt}});
 
     const bool useContext =
         AppConfig::instance().value(ConfigKeys::useTranslateContext).toBool();
-    const int totalBatches = (items.size() + kBatchSize - 1) / kBatchSize;
+    const qsizetype totalBatches = (itemCount + kBatchSize - 1) / kBatchSize;
 
-    for (int offset = 0, batchIdx = 0; offset < items.size();
-         offset += kBatchSize, ++batchIdx) {
+    for (qsizetype offset = 0; offset < itemCount; offset += kBatchSize) {
         if (cancelled_.load()) return false;
 
-        const QList<SrtItem> batch = items.mid(offset, kBatchSize);
+        const int batchSize = int(qMin(qsizetype(kBatchSize), itemCount - offset));
+        const qsizetype batchNumber = offset / kBatchSize + 1;
         QStringList batchTexts;
-        batchTexts.reserve(batch.size());
-        for (int j = 0; j < batch.size(); ++j) {
-            QString text = batch.at(j).text;
+        batchTexts.reserve(batchSize);
+        for (int j = 0; j < batchSize; ++j) {
+            QString text = isAss ? assCues.at(offset + j).modelText
+                                 : srtItems.at(offset + j).text;
             text.replace(QLatin1Char('\n'), QLatin1Char(' '));
             batchTexts << QString::number(j + 1) + QStringLiteral(". ") + text;
         }
         // JSON 格式要求已在 promptTemplate 中配置
         const QString userContent =
-            QStringLiteral("请翻译以下%1句文本：\n").arg(batch.size()) +
+            QStringLiteral("请翻译以下%1句文本：\n").arg(batchSize) +
             batchTexts.join(QLatin1Char('\n'));
 
         if (useContext) {
@@ -472,8 +460,8 @@ bool TranslateWorker::translate() {
         }
 
         // 调用翻译（带重试机制，解析失败自动重试）
-        QStringList translated;
         QString fullResponse;
+        int validAssCount = 0;
         for (int attempt = 0; attempt <= kMaxRetries; ++attempt) {
             if (cancelled_.load()) return false;
 
@@ -489,32 +477,43 @@ bool TranslateWorker::translate() {
                 return false;
             }
 
-            translated = parseTranslationResponse(fullResponse, batch.size());
-            // 严格校验：数量必须完全匹配
-            if (translated.size() == batch.size()) break;
+            const QStringList translated = parseTranslationResponse(fullResponse, batchSize);
+            int actual = int(translated.size());
+            if (isAss) {
+                if (actual == batchSize) {
+                    for (int j = 0; j < batchSize; ++j) {
+                        QString& result = assTranslations[offset + j];
+                        if (result.isEmpty() && assCues.at(offset + j).restoreTranslation(
+                                removeThinkingContent(translated.at(j)), result))
+                            ++validAssCount;
+                    }
+                }
+                actual = validAssCount;
+            } else if (actual == batchSize) {
+                for (int j = 0; j < batchSize; ++j)
+                    srtItems[offset + j].text = sanitizeText(translated.at(j));
+            }
+            if (actual == batchSize) break;
 
-            const int actual = translated.size();
             if (attempt < kMaxRetries) {
                 const QString warning =
-                    QStringLiteral("批次 %1/%2 第 %3 次解析失败 (期望 %4 条，实际 %5 "
-                                   "条)，重试中...")
-                        .arg(batchIdx + 1)
+                    QStringLiteral("批次 %1/%2 第 %3 次校验未通过 (通过 %4/%5 条)，重试中...")
+                        .arg(batchNumber)
                         .arg(totalBatches)
                         .arg(attempt + 1)
-                        .arg(batch.size())
-                        .arg(actual);
+                        .arg(actual)
+                        .arg(batchSize);
                 taskLogger_->warning(warning);
                 emit GlobalEventBus::instance().taskLogSignal(
                     QStringLiteral("translate"), warning, false, false);
             } else {
                 const QString message =
-                    QStringLiteral("批次 %1/%2 重试 %3 次仍失败 (期望 %4 条，实际 %5 "
-                                   "条)，该批保留原文")
-                        .arg(batchIdx + 1)
+                    QStringLiteral("批次 %1/%2 重试 %3 次后，仍有 %4/%5 条保留原文")
+                        .arg(batchNumber)
                         .arg(totalBatches)
                         .arg(kMaxRetries)
-                        .arg(batch.size())
-                        .arg(actual);
+                        .arg(batchSize - actual)
+                        .arg(batchSize);
                 taskLogger_->error(message);
                 emit GlobalEventBus::instance().taskLogSignal(
                     QStringLiteral("translate"), message, true, false);
@@ -526,15 +525,8 @@ bool TranslateWorker::translate() {
             messages.append(QJsonObject{{QStringLiteral("role"), QStringLiteral("assistant")},
                                         {QStringLiteral("content"), fullResponse}});
 
-        // 更新 SRT 项目（仅在解析成功时）
-        if (translated.size() == batch.size()) {
-            for (int j = 0; j < batch.size(); ++j)
-                items[offset + j].text = sanitizeText(translated.at(j));
-        }
-
         // 更新进度
-        const int progress =
-            qMin(100, int((offset + kBatchSize) / double(items.size()) * 100));
+        const int progress = int((offset + batchSize) * 100 / itemCount);
         emit GlobalEventBus::instance().updateTaskStatusSig(
             task_->taskId, progress, QVariant(int(TaskStatus::Processing)), QString(),
             0.0, QString(), 0.0);
@@ -545,51 +537,19 @@ bool TranslateWorker::translate() {
 
     if (cancelled_.load()) return false;
 
-    // 组装最终的 SRT 并写入文件
-    QFile output(task_->outputPath);
-    if (!output.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+    // ASS 保留原始行尾，使用带 BOM 的 UTF-8 兼容 VSFilter。
+    const QByteArray content = isAss
+        ? QByteArray("\xEF\xBB\xBF") + assembleAss(task_->rawContent, assCues, assTranslations).toUtf8()
+        : removeThinkingContent(assembleSrt(srtItems)).toUtf8();
+    QSaveFile output(task_->outputPath);
+    const auto mode = isAss ? QIODevice::WriteOnly : QIODevice::WriteOnly | QIODevice::Text;
+    if (!output.open(mode) || output.write(content) != content.size() || !output.commit()) {
         taskLogger_->error(QStringLiteral("翻译任务失败: ") + task_->inputPath +
                            QStringLiteral(" - ") + analysisAiError(output.errorString()));
         return false;
     }
-    output.write(assembleSrt(items).toUtf8());
-    output.close();
-
-    // 翻译完成后进行后处理：去除思考内容
-    if (!postProcess()) return false;
 
     taskLogger_->info(QStringLiteral("翻译任务已完成: ") + task_->inputPath);
-    return true;
-}
-
-bool TranslateWorker::postProcess() {
-    QFile file(task_->outputPath);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        const QString message = formatText(Text::instance().TextAuto061, {file.errorString()});
-        taskLogger_->error(QStringLiteral("翻译后处理失败: ") + task_->inputPath +
-                           QStringLiteral(" - ") + message);
-        return false;
-    }
-    const QString content = QString::fromUtf8(file.readAll());
-    file.close();
-
-    const QString cleaned = removeThinkingContent(content);
-    if (cleaned == content) {
-        taskLogger_->info(QStringLiteral("未检测到思考内容，文件保持不变: ") +
-                          task_->outputPath);
-        return true;
-    }
-    QFile output(task_->outputPath);
-    if (!output.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
-        const QString message =
-            formatText(Text::instance().TextAuto061, {output.errorString()});
-        taskLogger_->error(QStringLiteral("翻译后处理失败: ") + task_->inputPath +
-                           QStringLiteral(" - ") + message);
-        return false;
-    }
-    output.write(cleaned.toUtf8());
-    output.close();
-    taskLogger_->info(QStringLiteral("已去除思考内容，文件已更新: ") + task_->outputPath);
     return true;
 }
 

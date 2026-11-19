@@ -3,11 +3,11 @@
 </p>
 
 <h1 align="center">
-  Fairy Kekkai Workshop
+  Fairy Kekkai Workshop ASS 适配功能增强版
 </h1>
 
 <p align="center">
-  <a href="https://fkw.ora-san.org/">软件官网</a>
+  <a href="https://fkw.ora-san.org/">原项目官网</a>
 </p>
 
 <p align="center">
@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  完整的项目管理、支持1800+网站视频下载、对于YouTube额外支持根据视频列表一键创建项目、基于VideOCR的视频OCR（支持PaddleOCR与Google Lens引擎）、Whisper语音识别、可自定义接入AI的字幕文件翻译、屏幕悬浮取词翻译、基于FFmpeg的视频压制。
+  项目管理、视频与播放列表下载、PaddleOCR 视频字幕识别、Whisper 语音识别、AI 字幕翻译、屏幕悬浮取词翻译，以及基于 FFmpeg 的视频压制。
 </p>
 
 <p align="center">
@@ -60,6 +60,15 @@
 
 
 
+## 相对原项目的改动
+
+3.1.0 EX 基于天机阁的 [Fairy Kekkai Workshop v3.1.0](https://github.com/Fairy-Oracle-Sanctuary/Fairy-Kekkai-Workshop/tree/v3.1.0) 修改。
+
+1. **字幕样式识别**。OCR 可自动识别字幕颜色、字号和画面位置，并写入 ASS 字幕。三项都可单独开启或关闭。
+2. **ASS 时间轴适配**。按实际帧率处理字幕起止帧，减少导入 ASS 编辑器后因时间戳舍入造成的帧偏移。
+3. **修复字幕压制**。视频压制可以将 ASS 或 SRT 字幕烧录到画面，并保留 ASS 字幕的样式。
+4. **新增视频超分和补帧**。集成 Real-ESRGAN 和 RIFE。效果一般且因片源而异，可能出现过锐、重影或插帧伪影。建议先预览一小段，正式成片慎用。
+
 ## 功能特性
 
 ### 📁 项目管理
@@ -79,7 +88,7 @@
 - 支持自定义视频质量和格式
 
 ### 🔤 字幕提取（OCR）
-- 基于 [VideOCR](https://github.com/timminator/VideOCR)，支持 PaddleOCR 与 Google Lens 双引擎
+- 基于 [VideOCR](https://github.com/timminator/VideOCR) 和 PaddleOCR
 - 支持 200+ 种语言识别
 - 可视化字幕区域选择
 - 支持双区域OCR（上下字幕）
@@ -112,6 +121,23 @@
 - 自动嵌入字幕
 - 实时输出日志
 
+### 🔎 视频超分
+- 「超分」入口包含视频超分、视频超分任务和高级设置
+- 面向东方 MMD，支持 Real-ESRGAN 动漫视频、通用及动漫插图模型
+- 主页面选择视频路径、目标分辨率、放大倍数或自定义尺寸，以及编码画质、格式和音频处理
+- 默认复用完全相同帧的超分结果，支持跨批次及不相邻重复画面，保持原始帧数、帧率与时长
+- 最多 5 秒的片段预览，显示渲染进度、处理帧数、速度和预计剩余时间，支持同步播放对比和逐帧查看
+- 分批缓存、取消清理和输出校验；首版支持固定帧率 SDR 视频
+- 接入、资源与验证说明见 [SUPERRES.md](cpp/SUPERRES.md)
+
+### 🎞️ 视频补帧
+- 「补帧」入口包含视频补帧、视频补帧任务和高级设置，沿用超分的布局与预览方式
+- 面向东方 MMD，默认 RIFE 4.6，支持常用帧率、2/3/4 倍和自定义目标帧率，保持原视频时长与音画同步
+- 默认启用静止画面复用、切镜保护；进度和速度按实际需要模型计算的新帧统计
+- 拖动画面选择起点，最多预览 5 秒，原片与结果按相同播放时间同步比较
+- 模型整项任务仅加载一次，预读、补帧和编码并行；与超分共用显卡排队，支持取消与失败清理
+- 接入、资源与短测试说明见 [INTERPOLATION.md](cpp/INTERPOLATION.md)
+
 ### 🎨 界面特性
 - 现代化UI设计（Qt 6 + Qt-Fluent-Widgets，原生 C++ 实现）
 - 标题栏快捷主题切换（深色/浅色模式）
@@ -142,18 +168,18 @@
 
 ### 方式一：直接安装（推荐）
 
-从 [Releases](https://github.com/Fairy-Oracle-Sanctuary/Fairy-Kekkai-Workshop/releases) 页面下载对应显卡的安装包，按向导完成安装即可，无需任何开发环境。
+从本仓库的 **Releases** 下载 3.1.0 EX 的完整安装包，按向导安装。安装包自带 OCR、Whisper、常规超分和补帧模型。
 
 - CPU：适用于无独立显卡 / 不支持 CUDA 的设备
-- GPU (CUDA 11.8)：适用于 Nvidia 10 系列
-- GPU (CUDA 12.9)：适用于 Nvidia 16 - 50 系列
+- GPU (CUDA 12.9)：适用于支持 CUDA 12.9 的 NVIDIA 显卡，含 CPU OCR 回退
+- 视频超分和补帧需要可用的 Vulkan 驱动。在线下载和翻译需要网络，部分翻译服务需要自行填写密钥。
 
 ### 方式二：从源码构建（C++）
 
 #### 1. 克隆仓库
 
 ```bash
-git clone https://github.com/Fairy-Oracle-Sanctuary/Fairy-Kekkai-Workshop.git
+git clone --recurse-submodules "<本增强版的仓库地址>"
 cd Fairy-Kekkai-Workshop
 ```
 
@@ -297,7 +323,6 @@ A:
 2. 确保 PaddleOCR 模型文件存在于 `tools/OCR.model/` 目录
 3. 检查 VC++ 运行时是否已安装（需要 MSVCP140.dll 和 VCRUNTIME140.dll）
 4. 检查 GPU 驱动是否支持 CUDA（如使用 GPU）
-5. 如果使用 Google Lens 引擎，确保网络连接正常
 
 ### Q: Whisper 语音识别失败
 
@@ -337,7 +362,7 @@ A:
 | 功能 | 状态 | 备注 |
 |------|------|------|
 | 视频下载 | ✅ | 基于yt-dlp，支持1800+网站 |
-| 字幕提取 | ✅ | 基于 VideOCR，支持 PaddleOCR/Google Lens 引擎，仅 Windows |
+| 字幕提取 | ✅ | 基于 VideOCR 和 PaddleOCR，仅 Windows |
 | 语音识别 | ✅ | whisper.cpp，仅Windows，支持实时进度 |
 | 翻译 | ✅ | 多 AI 服务通过 HTTP API 接入，需配置对应密钥 |
 | 屏幕悬浮取词 | ✅ | 仅Windows，支持窗口绑定与跟随 |
@@ -352,7 +377,7 @@ A:
 - **主程序**：C++17 + Qt 6 + Qt-Fluent-Widgets（原生桌面程序）
 - **图像处理**：OpenCV 4.12
 - **视频处理**：FFmpeg + yt-dlp
-- **字幕识别**：[VideOCR](https://github.com/timminator/VideOCR)（PaddleOCR / Google Lens）
+- **字幕识别**：[VideOCR](https://github.com/timminator/VideOCR) 和 PaddleOCR
 - **语音识别**：[ggml-org/whisper.cpp](https://github.com/ggml-org/whisper.cpp)
 - **翻译**：多个云API（OpenAI、Deepseek、腾讯混元等）
 - **JSON 处理**：nlohmann/json（header-only）
@@ -378,9 +403,7 @@ A:
 
 ## 许可证
 
-本项目采用 GPL 许可证。详见仓库根目录的 LICENSE 文件。
-
-**特别说明**：软件的图标（icon）单独采用 CC-BY-SA 许可证。
+增强版程序源码沿用 [GPLv3](LICENSE)。原项目图标由天机阁提供，沿用 [CC BY-SA 4.0](LICENSE-TEXT)。安装包内的第三方组件与模型各自适用其原许可证，详见[组件与源码清单](docs/WINDOWS-RELEASE.md)。AniSD 权重另行获取，适用 CC BY-NC 4.0。
 
 ---
 

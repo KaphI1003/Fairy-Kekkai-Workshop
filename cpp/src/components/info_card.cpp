@@ -33,7 +33,7 @@ FairyKekkaiWorkshopInfoCard::FairyKekkaiWorkshopInfoCard(QWidget* parent)
                                              QStringLiteral("Baby2016"), this);
     // 版本号与更新时间统一取自内嵌 setting_data.json，避免与更新检查（version_service）比较用的版本号不一致。
     auto* version = new StatisticsWidget(
-        trText("版本"), QStringLiteral("v") + settingData(QStringLiteral("VERSION")).toString(), this);
+        trText("版本"), settingData(QStringLiteral("DISPLAY_VERSION")).toString(), this);
     auto* updateTime = new StatisticsWidget(
         trText("更新时间"), settingData(QStringLiteral("UPDATE_TIME")).toString(), this);
     // 首页只显示运行类型和版本号，完整引擎名称放到悬停提示中。

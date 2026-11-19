@@ -55,6 +55,8 @@ namespace fkw
             {":/app/images/controls/whisper.svg", "语音识别", "提取视频内的人声", "whisper"},
             {":/app/images/controls/translate.svg", "翻译字幕", "翻译提取出的字幕文件", "translate"},
             {":/app/images/controls/video.svg", "视频压制", "压制烤制好的视频", "ffmpeg"},
+            {":/app/images/controls/video.svg", "视频超分", "提高东方 MMD 视频的分辨率", "superres"},
+            {":/app/images/controls/video.svg", "视频补帧", "提高东方 MMD 视频的播放帧率", "interpolation"},
             {":/app/images/controls/setting.svg", "软件设置", "设置软件的各项参数", "settings"},
         };
         for (const auto &item : cards)

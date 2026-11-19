@@ -15,6 +15,8 @@
 - 🌐 **智能翻译**：支持多个 AI 模型（OpenAI、Deepseek、腾讯混元、ERNIE、Gemini、书生等）
 - 🔍 **悬浮取词翻译**：屏幕任意区域框选后 OCR + AI 翻译，支持窗口绑定、跟随、置顶、鼠标穿透（仅 Windows）
 - 🎬 **视频压制**：基于 FFmpeg，支持自定义编码参数
+- 🔎 **视频超分**：Real-ESRGAN + FFmpeg，面向东方 MMD，支持尺寸设置、任务队列及带进度的 5 秒同步对比预览；见 `cpp/SUPERRES.md`。
+- 🎞️ **视频补帧**：RIFE + FFmpeg，沿用超分工作流，支持目标帧率、定格复用、切镜保护、常驻模型与按时间同步的预览；见 `cpp/INTERPOLATION.md`。
 - 💾 **项目管理**：完整的项目文件系统管理，支持导入/链接外部项目，首次启动自动迁移到独立数据目录
 - 🎨 **主题切换**：标题栏快捷主题切换按钮，支持深色/浅色模式
 - 🚀 **启动页**：带进度条和状态文字的启动页面，含启动维护（项目迁移 / 旧版资源清理）
@@ -681,6 +683,14 @@ process.start()
 3. 文本识别（PaddleOCR CRNN 或 Google Lens）
 4. 置信度过滤（丢弃低质量识别结果）
 5. 字幕生成和合并（Levenshtein 相似度）
+
+**帧语义**：SRT 的 `end` 是排他边界。某条字幕最后可见帧为 N 时，`end` 写的是帧 N+1 的 canonical 时间；无缝衔接时下一条字幕的 `start` 与它相同。OCR 内部以 `start_frame` / `end_frame_exclusive` 生成 cue，输出时 CFR 直接用帧号算毫秒，VFR 查 `frame_timestamps`，不再在毫秒层反复取整。需要“最后可见帧”时应使用 `videocr/frame_time.py` 的 `last_visible_frame(end_ms, fps)`，不要在 `end` 上再加一帧。OCR 默认还会在同目录生成同名 `.ass`：Start/End 都按帧边界向下取整到厘秒，匹配 Aegisub 的 START/END 帧映射；`--no_ass` 可关闭，`--ass_output` 可指定路径。
+
+**ASS 自动配色（CPU）**：在生成 ASS 时独立读取原始彩色视频，不再依赖 OCR 的亮度处理、JPEG 或 SSIM 保留下来的首尾帧。每条 cue 从内部时间点挑选最多 5 个候选画面，按文字区域清晰度排序，通常精提色 2 帧，分歧时继续补样。`videocr/color_styles.py` 使用 CPU 上的 NumPy/SciPy 分析字面与描边的包围关系、颜色纯度及有效面积；倾斜行按 OCR 四边形校正。颜色缺失不凭亮度伪造描边；跨帧融合保留可靠的实际颜色对，不平均淡入淡出残影。全片可靠颜色对以 Lab/CIEDE2000 和 complete-link 聚类建立统一样式表，fill 与 outline 分别设距离门限；低置信度结果只能加入已有样式，且不能修改代表色。视频自带可匹配软字幕时沿用其颜色。
+
+`--no_color_styles` 或 `--no_ass` 会跳过原色采样；`--color_style_budget 360` 是默认 6 分钟软预算，临近预算只减少补样，不丢掉尚未处理的字幕；`--color_report out.json` 输出原色采样、聚类、总耗时、逐条置信度、原始文字框和未决样式。日志中的 `unresolved` 与确认的白字黑边分开统计。
+
+`fix_srt_frames.py` 保留给外部/旧 SRT 做帧网格规范化；需要逐条帧号时给 `videocr_cli.py` 加 `--frame_report out.json`，报告同时包含 `start_frame`、`end_boundary_frame`、`last_visible_frame`。
 
 **OCR 高级参数说明**：
 

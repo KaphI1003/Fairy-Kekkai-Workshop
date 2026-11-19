@@ -5,6 +5,7 @@
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
+#include <QLibrary>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QSaveFile>
@@ -128,7 +129,20 @@ void WhisperWorker::run() {
         QStringLiteral("whisper"));
     task_->logPath = taskLogger_->logFilePath();
 
-    const QString cliPath = getWhisperCliPath();
+    QString cliPath = getWhisperCliPath();
+    bool useGpu = task_->useGpu;
+#ifdef Q_OS_WIN
+    const QDir tools(QDir(sourceRoot()).filePath(QStringLiteral("tools")));
+    const QString defaultCli = tools.filePath(QStringLiteral("whisper/whisper-cli.exe"));
+    const QString cpuCli = tools.filePath(QStringLiteral("whisper-cpu/whisper-cli.exe"));
+    if (QFileInfo(cliPath) == QFileInfo(defaultCli) && QFileInfo::exists(cpuCli)) {
+        QLibrary vulkan(QStringLiteral("vulkan-1"));
+        if (!vulkan.load()) {
+            cliPath = cpuCli;
+            useGpu = false;
+        }
+    }
+#endif
     QString error;
     if (!QFileInfo::exists(cliPath)) error = QStringLiteral("whisper-cli 不存在: ") + cliPath;
     else if (task_->modelFile.isEmpty() || !QFileInfo::exists(task_->modelFile))
@@ -162,6 +176,7 @@ void WhisperWorker::run() {
     if (success && !cancelled_.load()) {
         // 只在任务独占的临时目录生成结果，失败不覆盖用户已有字幕。
         WhisperTask invocation = *task_;
+        invocation.useGpu = useGpu;
         invocation.inputPath = audioPath;
         invocation.outputPath = temporary.filePath(QStringLiteral("result.") + task_->format);
         const int exitCode = runProcess(cliPath, buildWhisperCommand(invocation));

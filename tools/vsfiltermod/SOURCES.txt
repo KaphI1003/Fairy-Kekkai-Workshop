@@ -1,0 +1,7 @@
+VSFilterMod r5.3.1 x64
+https://github.com/Masaiki/VSFilterMod/releases/tag/r5.3.1
+SHA256 VSFilterMod.dll D11B4E3DF394A3FAF6940213A6083CFF13761B48908E182EC2BAA50AA1868BE7
+
+AviSynth+ v3.7.5 x64
+https://github.com/AviSynth/AviSynthPlus/releases/tag/v3.7.5
+SHA256 ../AviSynth.dll 8F7D07917E4B364DF5FD7F1B8B3C1E135465D73325F8D25BC4354DD6435AFAB4

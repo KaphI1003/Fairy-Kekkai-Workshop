@@ -14,6 +14,7 @@
 #include <QNetworkRequest>
 #include <QRegularExpression>
 #include <QSpacerItem>
+#include <QSignalBlocker>
 #include <QUrl>
 #include <memory>
 
@@ -21,6 +22,8 @@
 #include "common/config.h"
 #include "common/setting.h"
 #include "common/text.h"
+#include "service/paddleocr.h"
+#include "service/ocr_device_probe.h"
 
 namespace fkw {
 ChooseFileSettingCard::ChooseFileSettingCard(qfw::FluentIconEnum icon,
@@ -325,7 +328,9 @@ OCRSettingInterface::OCRSettingInterface(QWidget* parent)
                                           bool directory, const QString& filter = {}) {
         auto* card = new qfw::PushSettingCard(
             button, QVariant::fromValue(QIcon(QStringLiteral(":/app/images/logo/Paddle.svg"))),
-            title, cfg.value(key).toString(), programs);
+            title, QString::fromLatin1(key.name) == QLatin1String(ConfigKeys::cpuPaddleocrPath.name) ? configuredPaddleOcrEngine(false)
+                 : QString::fromLatin1(key.name) == QLatin1String(ConfigKeys::gpuPaddleocrPath.name) ? configuredPaddleOcrEngine(true)
+                 : cfg.value(key).toString(), programs);
         programs->addSettingCard(card);
         connect(card, &qfw::PushSettingCard::clicked, this,
                 [this, card, key, title, warning, directory, filter, &cfg]() {
@@ -345,7 +350,9 @@ OCRSettingInterface::OCRSettingInterface(QWidget* parent)
             if (cfg.set(key, path)) card->setContent(path);
         });
     };
-    pathCard(ConfigKeys::paddleocrPath, t.PSPE, t.SelectFile3, t.PEPMNCCC,
+    pathCard(ConfigKeys::cpuPaddleocrPath, trText("CPU OCR 引擎"), t.SelectFile3, t.PEPMNCCC,
+             false, QStringLiteral("paddleocr.exe (*.exe)"));
+    pathCard(ConfigKeys::gpuPaddleocrPath, trText("GPU OCR 引擎"), t.SelectFile3, t.PEPMNCCC,
              false, QStringLiteral("paddleocr.exe (*.exe)"));
     pathCard(ConfigKeys::supportFilesPath, t.PleaseSelectOCRModel, t.SelectFolder,
              t.OMPMNCCC, true);
@@ -420,24 +427,84 @@ OCRSettingInterface::OCRSettingInterface(QWidget* parent)
                 [key, &cfg](bool checked) { cfg.set(key, checked); });
         return card;
     };
-    auto* gpu = feature(ConfigKeys::useGpu, qfw::FluentIconEnum::DeveloperTools, t.EGA, t.UGFFOP);
-    const QString ocrVersion = paddleOcrVersion();
-    if (ocrVersion.contains(QStringLiteral("CPU"), Qt::CaseInsensitive)) {
-        cfg.set(ConfigKeys::useGpu, false);
-        gpu->setChecked(false);
+    auto* gpu = new qfw::SwitchSettingCard(qfw::FluentIconEnum::DeveloperTools,
+        t.EGA, trText("关闭使用 CPU，开启使用 GPU；切换对新启动的任务生效。"), nullptr, features);
+    gpu->setObjectName(QStringLiteral("ocrGpuSwitch"));
+    gpu->setChecked(cfg.value(ConfigKeys::useGpu).toBool());
+    features->addSettingCard(gpu);
+    const auto refreshDevice = [gpu, &cfg] {
+        const bool enabled = cfg.value(ConfigKeys::useGpu).toBool();
+        const QSignalBlocker blocker(gpu);
+        gpu->setChecked(enabled);
+        gpu->setContent(enabled
+            ? trText("已选择 GPU；关闭后使用 CPU。切换对新启动的任务生效。")
+            : trText("已选择 CPU；开启后使用 GPU。切换对新启动的任务生效。"));
+    };
+    refreshDevice();
+    connect(gpu, &qfw::SwitchSettingCard::checkedChanged, this,
+            [this, gpu, refreshDevice, &cfg](bool enabled) {
+        const QString path = configuredPaddleOcrEngine(enabled);
+        if (!QFileInfo(path).isFile()) {
+            refreshDevice();
+            qfw::MessageDialog dialog(trText("OCR 引擎未安装"),
+                enabled ? trText("请先安装 GPU OCR 引擎，并在上方选择 GPU 引擎程序。")
+                        : trText("请先安装 CPU OCR 引擎，并在上方选择 CPU 引擎程序。"), window());
+            dialog.cancelButton->hide();
+            dialog.exec();
+            return;
+        }
+        // 关闭也验证 CPU，避免切到不可用的运行环境。检查期间不更改保存值。
         gpu->setEnabled(false);
-    } else if (ocrVersion.contains(QStringLiteral("GPU"), Qt::CaseInsensitive)) {
-        // PaddleOCR 3.7.0 GPU 版在 CPU 模式下无法推理 PP-OCRv6，强制启用 GPU
-        cfg.set(ConfigKeys::useGpu, true);
-        gpu->setChecked(true);
-        gpu->setEnabled(false);
-    }
+        gpu->setContent(trText("正在检查识别设备，请稍候…"));
+        auto* probe = new OcrDeviceProbe(this);
+        connect(probe, &OcrDeviceProbe::finished, this,
+                [this, gpu, probe, path, enabled, refreshDevice, &cfg](bool ok, const QString& detail) {
+            QString error = detail;
+            if (ok && configuredPaddleOcrEngine(enabled) != path) {
+                ok = false;
+                error = trText("检查期间引擎路径发生变化，请重新切换设备。");
+            }
+            if (ok && !cfg.set(ConfigKeys::useGpu, enabled)) {
+                ok = false;
+                error = trText("无法保存设备设置，请检查配置文件是否可写。");
+            }
+            refreshDevice();
+            gpu->setEnabled(true);
+            probe->deleteLater();
+            if (!ok) {
+                qfw::MessageDialog dialog(trText("OCR 设备检查失败"),
+                    trText("已保留原来的设备设置。") + QLatin1Char('\n') + error, window());
+                dialog.cancelButton->hide();
+                dialog.exec();
+            }
+        });
+        // 固定使用中英日通用模型检查设备，不受当前字幕语种的词表影响。
+        probe->start(path, enabled, resolveModelDirs(
+            QStringLiteral("en"), cfg.value(ConfigKeys::useServerModel).toBool(),
+            cfg.value(ConfigKeys::supportFilesPath).toString()));
+    });
     feature(ConfigKeys::useDualZone, qfw::FluentIconEnum::View,
             t.EnableDualAreaOCR, t.SSTASP);
     feature(ConfigKeys::postProcessing, qfw::FluentIconEnum::Edit,
             t.UsePostProcessing, t.APPOTOR);
     feature(ConfigKeys::useServerModel, qfw::FluentIconEnum::Cloud,
             t.UHPM, t.UABMFOP);
+    feature(ConfigKeys::recognizeSubtitleColors, qfw::FluentIconEnum::Palette,
+            trText("启用字幕颜色识别"),
+            trText("自动识别单边框字幕颜色，正确率90%以上，特效字幕可能识别失效"))
+        ->setObjectName(QStringLiteral("ocrSubtitleColorSwitch"));
+    auto* position = feature(ConfigKeys::recognizeSubtitlePosition, qfw::FluentIconEnum::View,
+             trText("启用字幕位置识别"), trText("将 ASS 字幕居中放在原字幕上方"));
+    position->setObjectName(QStringLiteral("ocrSubtitlePositionSwitch"));
+    auto* gap = boundRange(this, features, ConfigKeys::subtitleGap1080p,
+             qfw::FluentIconEnum::BackToWindow, trText("中日字幕间距"),
+             trText("以 1080p 像素为单位，随视频高度换算"), 0, 100);
+    gap->setObjectName(QStringLiteral("ocrSubtitleGap"));
+    gap->setEnabled(cfg.value(ConfigKeys::recognizeSubtitlePosition).toBool());
+    connect(position, &qfw::SwitchSettingCard::checkedChanged, gap, &QWidget::setEnabled);
+    feature(ConfigKeys::recognizeSubtitleFontSize, qfw::FluentIconEnum::Zoom,
+             trText("启用字幕字号识别"), trText("根据原字幕的单行文字框高度估算 ASS 字号"))
+        ->setObjectName(QStringLiteral("ocrSubtitleFontSizeSwitch"));
     finish();
 }
 
@@ -627,7 +694,7 @@ FFmpegSettingInterface::FFmpegSettingInterface(QWidget* parent)
                 {QStringLiteral("libx264"), QStringLiteral("libx265"),
                  QStringLiteral("libvpx-vp9"), QStringLiteral("copy")});
     boundRange(this, video, ConfigKeys::ffmpegCrf, I::SpeedHigh,
-               t.CRFQualityParameter, t.Text0IL12ICRLVMBQ, 0, 51);
+               trText("编码质量（CPU CRF / GPU CQ）"), trText("数值越小画质越高。0 使用软件编码；相同数值在不同编码器上的画质可能不同。"), 0, 51);
     boundChoice(this, video, ConfigKeys::ffmpegPreset, I::Setting,
                 t.EncodingSpeedPreset, t.BBESACR,
                 {t.VeryFast, t.SuperFast, t.VeryFast2, t.Faster, t.Fast,
@@ -701,11 +768,13 @@ FFmpegSettingInterface::FFmpegSettingInterface(QWidget* parent)
                  t.Text50Fps, t.Text60Fps},
                 {QStringLiteral("source"), QStringLiteral("24"), QStringLiteral("25"),
                  QStringLiteral("30"), QStringLiteral("50"), QStringLiteral("60")});
+    boundSwitch(this, processing, ConfigKeys::ffmpegSourceRateLimit, I::SpeedHigh,
+                trText("按片源码率控制体积"), trText("H.264 / H.265 以片源平均视频码率的 120% 限速。手动填写码率时优先使用手动值。"));
     boundField(this, processing, ConfigKeys::ffmpegVideoBitrate, iconOf(I::SpeedHigh),
                t.VideoBitrateLimit, t.SVBLEG2EMNL);
     auto* performance = addGroup(t.PerformanceOptions);
     boundSwitch(this, performance, ConfigKeys::ffmpegUseHardwareAcceleration,
-                I::DeveloperTools, t.EHA, t.UGHAFE);
+                I::DeveloperTools, trText("启用硬件解码"), trText("选择输入视频的解码设备。GPU 编码开关位于视频压制页。"));
     boundChoice(this, performance, ConfigKeys::ffmpegHardwareAccelerator, I::VPN,
                 t.HAT, t.SHAM,
                 {t.AutoDetect, t.NVIDIACUDA, t.IntelQSV, t.DXVA2, t.VideoToolbox},

@@ -1,6 +1,8 @@
 #include "common/setting.h"
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
+#include <QRegularExpression>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include "common/app_data.h"
@@ -61,6 +63,41 @@ QString paddleOcrDefaultPath() {
     const QString subdir = version.isEmpty() ? QString() : version + QLatin1Char('/');
     return QDir(sourceRoot()).filePath(QStringLiteral("tools/") + subdir
                                        + QStringLiteral("paddleocr") + executableSuffix());
+}
+QStringList paddleOcrEngineNames(const QString& version) {
+    const auto match = QRegularExpression(
+        QStringLiteral("^PaddleOCR-(?:CPU|GPU)-(v[0-9]+(?:\\.[0-9]+)*)(?:-CUDA-[0-9.]+)?$"))
+        .match(version);
+    if (!match.hasMatch()) return version.isEmpty() ? QStringList{} : QStringList{version};
+    const QString base = QStringLiteral("PaddleOCR-");
+    const QString generation = match.captured(1);
+    QStringList names{version, base + QStringLiteral("CPU-") + generation,
+            base + QStringLiteral("GPU-") + generation + QStringLiteral("-CUDA-12.9"),
+            base + QStringLiteral("GPU-") + generation + QStringLiteral("-CUDA-11.8")};
+    names.removeDuplicates();
+    return names;
+}
+QString paddleOcrCpuDefaultPath() {
+    for (const QString& name : paddleOcrEngineNames(paddleOcrVersion())) {
+        if (name.contains(QStringLiteral("-CPU-")))
+            return QDir(sourceRoot()).filePath(QStringLiteral("tools/") + name
+                                               + QStringLiteral("/paddleocr") + executableSuffix());
+    }
+    return {};
+}
+QString paddleOcrGpuDefaultPath() {
+    const QString version = paddleOcrVersion();
+    QStringList names = paddleOcrEngineNames(version);
+    if (version.contains(QStringLiteral("-GPU-"))) names.prepend(version);
+    QString fallback;
+    for (const QString& name : names) {
+        if (!name.contains(QStringLiteral("-GPU-"))) continue;
+        const QString path = QDir(sourceRoot()).filePath(QStringLiteral("tools/") + name
+                                          + QStringLiteral("/paddleocr") + executableSuffix());
+        if (fallback.isEmpty()) fallback = path;
+        if (QFileInfo(path).isFile()) return path;
+    }
+    return fallback;
 }
 QString paddleOcrSupportFilesName() {
     // 与 PaddleOCR-Standalone v3.7.0 的模型代次（PP-OCRv6）对齐

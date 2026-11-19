@@ -163,6 +163,11 @@ QStringList buildOcrCommand(const OcrTask& task) {
     cmd << QStringLiteral("--ocr_image_max_width")
         << QString::number(task.ocrImageMaxWidth);
     cmd << QStringLiteral("--post_processing") << boolText(task.postProcessing);
+    if (!task.recognizeSubtitleColors) cmd << QStringLiteral("--no_color_styles");
+    if (!task.recognizeSubtitlePosition) cmd << QStringLiteral("--no_subtitle_position");
+    if (!task.recognizeSubtitleFontSize) cmd << QStringLiteral("--no_subtitle_font_size");
+    if (task.recognizeSubtitlePosition && task.subtitleGap1080p != 8)
+        cmd << QStringLiteral("--subtitle_gap_1080p") << QString::number(task.subtitleGap1080p);
     cmd << QStringLiteral("--min_subtitle_duration")
         << QString::number(task.minSubtitleDurationSec);
     cmd << QStringLiteral("--conf_threshold")
@@ -215,11 +220,18 @@ void OcrWorker::run() {
         QStringLiteral("videocr"));
     task_->logPath = taskLogger_->logFilePath();
 
-    // 清理临时目录
-    if (!task_->tempDir.isEmpty() && QDir(task_->tempDir).exists()) {
-        if (!QDir(task_->tempDir).removeRecursively())
-            taskLogger_->error(QStringLiteral("清理临时目录失败: ") + task_->tempDir);
+    // 排队期间可以切设备；已运行任务保留本次启动时的选择。
+    task_->useGpu = AppConfig::instance().value(ConfigKeys::useGpu).toBool();
+    task_->paddleocrPath = configuredPaddleOcrEngine(task_->useGpu);
+    if (!QFileInfo(task_->paddleocrPath).isFile()) {
+        taskLogger_->error(QStringLiteral("缺少 %1 OCR 引擎，请在 OCR 高级设置中选择对应引擎。路径：%2")
+            .arg(task_->useGpu ? QStringLiteral("GPU") : QStringLiteral("CPU"), task_->paddleocrPath));
+        finish(false);
+        deleteLater();
+        return;
     }
+    taskLogger_->info(QStringLiteral("OCR 设备: %1；引擎: %2")
+        .arg(task_->useGpu ? QStringLiteral("GPU") : QStringLiteral("CPU"), task_->paddleocrPath));
 
     // 构建命令并检查可执行文件
     const QString cmdPath =
@@ -249,6 +261,7 @@ void OcrWorker::run() {
         process_ = new QProcess();  // 创建于 Worker 线程，信号在本线程分发
     }
     process_->setProcessChannelMode(QProcess::MergedChannels);
+    process_->setProcessEnvironment(paddleOcrEnvironment(task_->useGpu));
     connect(process_, &QProcess::readyReadStandardOutput, this,
             &OcrWorker::handleStdout, Qt::DirectConnection);
     QEventLoop loop;
@@ -528,8 +541,7 @@ void ScreenOcrRunner::execute() {
                                                    imgPath);
 
     // 3. 构建 paddleocr 命令
-    const QString paddleocrPath =
-        cfg.value(ConfigKeys::paddleocrPath).toString();
+    const QString paddleocrPath = configuredPaddleOcrEngine(useGpu);
     if (!QFileInfo::exists(paddleocrPath)) {
         emit GlobalEventBus::instance().screen_ocr_finished(
             false, QStringLiteral("paddleocr 不存在: ") + paddleocrPath);
@@ -573,10 +585,7 @@ void ScreenOcrRunner::execute() {
 
     // 4. 执行 CLI 进程
     QProcess process;
-    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    env.insert(QStringLiteral("PYTHONIOENCODING"), QStringLiteral("utf-8"));
-    env.insert(QStringLiteral("PYTHONUNBUFFERED"), QStringLiteral("1"));
-    process.setProcessEnvironment(env);
+    process.setProcessEnvironment(paddleOcrEnvironment(useGpu));
     process.setProcessChannelMode(QProcess::MergedChannels);
     process.setProgram(paddleocrPath);
     process.setArguments(cmdArgs);

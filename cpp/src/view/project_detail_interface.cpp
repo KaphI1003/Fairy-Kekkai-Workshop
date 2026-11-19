@@ -1,3 +1,5 @@
+#include "service/subtitle_encode.h"
+#include "service/subtitle_translation.h"
 #include "view/project_detail_interface.h"
 
 #include <algorithm>
@@ -342,10 +344,11 @@ namespace fkw
         const auto stageStatus = [](const QDir& dir) {
             return QVector<bool>{QFileInfo::exists(dir.filePath(QStringLiteral("封面.jpg"))),
                 QFileInfo::exists(dir.filePath(QStringLiteral("生肉.mp4"))),
-                QFileInfo::exists(dir.filePath(QStringLiteral("原文.srt"))) ||
-                    QFileInfo::exists(dir.filePath(QStringLiteral("原文_OCR.srt"))) ||
-                    QFileInfo::exists(dir.filePath(QStringLiteral("原文_Whisper.srt"))),
-                QFileInfo::exists(dir.filePath(QStringLiteral("译文.srt"))),
+                !projectTranslationSource(dir, SubtitleFormat::Ass).isEmpty() ||
+                    !projectTranslationSource(dir, SubtitleFormat::Srt).isEmpty(),
+                !findEncodeSubtitle(dir.filePath(QStringLiteral("生肉.mp4"))).isEmpty() ||
+                    QFileInfo::exists(dir.filePath(QStringLiteral("译文.ass"))) ||
+                    QFileInfo::exists(dir.filePath(QStringLiteral("译文.srt"))),
                 QFileInfo::exists(dir.filePath(QStringLiteral("熟肉.mp4")))};
         };
         int complete = 0;
@@ -599,7 +602,8 @@ namespace fkw
                 if (files->property("filesLoaded").toBool()) return;
                 files->setProperty("filesLoaded", true);
                 const QDir episodeDir(episodePath);
-                const bool original = QFileInfo::exists(episodeDir.filePath(QStringLiteral("原文.srt"))) || QFileInfo::exists(episodeDir.filePath(QStringLiteral("原文_OCR.srt"))) || QFileInfo::exists(episodeDir.filePath(QStringLiteral("原文_Whisper.srt")));
+                const bool originalSrt = !projectTranslationSource(episodeDir, SubtitleFormat::Srt).isEmpty();
+                const bool originalAss = !projectTranslationSource(episodeDir, SubtitleFormat::Ass).isEmpty();
                 const bool encoded = QFileInfo::exists(episodeDir.filePath(QStringLiteral("熟肉.mp4")));
                 const struct
                 {
@@ -608,12 +612,15 @@ namespace fkw
                     bool download, extract, translate, encode, archive;
                 } expected[] = {
                     {"封面.jpg", qfw::FluentIconEnum::Photo, true, false, false, false, false},
-                    {"生肉.mp4", qfw::FluentIconEnum::Video, true, true, false, false, false},
+                    {"生肉.mp4", qfw::FluentIconEnum::Video, true, true, false,
+                        !findEncodeSubtitle(episodeDir.filePath(QStringLiteral("生肉.mp4"))).isEmpty(), false},
                     {"熟肉.mp4", qfw::FluentIconEnum::Video, false, false, false, encoded, false},
                     {"原文.srt", qfw::FluentIconEnum::Document, false, false, false, false, false},
                     {"原文_OCR.srt", qfw::FluentIconEnum::Document, false, false, false, false, true},
                     {"原文_Whisper.srt", qfw::FluentIconEnum::Document, false, false, false, false, true},
-                    {"译文.srt", qfw::FluentIconEnum::Document, false, false, original, false, false},
+                    {"译文.srt", qfw::FluentIconEnum::Document, false, false, originalSrt, false, false},
+                    {"原文.ass", qfw::FluentIconEnum::Document, false, false, false, false, false},
+                    {"译文.ass", qfw::FluentIconEnum::Document, false, false, originalAss, false, false},
                 };
                 for (const auto &file : expected)
                 {
@@ -744,21 +751,23 @@ namespace fkw
                 dir.filePath(QStringLiteral("生肉.mp4")),
                 dir.filePath(QStringLiteral("原文_Whisper.srt")));
             break;
-        case 2:
-            for (const char* name : {"原文.srt", "原文_OCR.srt", "原文_Whisper.srt"}) {
-                const QString source = dir.filePath(QString::fromUtf8(name));
-                if (QFileInfo::exists(source)) {
-                    emit GlobalEventBus::instance().translate_requested(
-                        source, dir.filePath(QStringLiteral("译文.srt")));
-                    return;
-                }
+        case 2: {
+            for (const auto format : {SubtitleFormat::Ass, SubtitleFormat::Srt}) {
+                const QString source = projectTranslationSource(dir, format);
+                if (source.isEmpty()) continue;
+                const QString output = dir.filePath(format == SubtitleFormat::Ass
+                    ? QStringLiteral("译文.ass") : QStringLiteral("译文.srt"));
+                emit GlobalEventBus::instance().translate_requested(source, output);
+                break;
             }
             break;
-        case 3:
-            emit GlobalEventBus::instance().ffmpeg_requested(
-                dir.filePath(QStringLiteral("熟肉.mp4")),
-                dir.filePath(QStringLiteral("熟肉_压制.mp4")));
+        }
+        case 3: {
+            const QString input = projectEncodeInput(folderPath);
+            if (!input.isEmpty())
+                emit GlobalEventBus::instance().ffmpeg_requested(input, projectEncodeOutput(input));
             break;
+        }
         default:
             break;
         }

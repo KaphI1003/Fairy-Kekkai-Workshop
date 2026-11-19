@@ -1,3 +1,4 @@
+#include "service/subtitle_encode.h"
 #include "components/file_item_widget.h"
 
 #include <QDesktopServices>
@@ -15,6 +16,7 @@
 #include "components/dialog.h"
 #include "common/text.h"
 #include "common/text_format.h"
+#include "service/subtitle_translation.h"
 
 namespace fkw {
 FileItemWidget::FileItemWidget(const QString& fileName, const QString& filePath,
@@ -125,22 +127,10 @@ FileItemWidget::FileItemWidget(const QString& fileName, const QString& filePath,
     });
     addQuickTask(!exists && canTranslate, qfw::FluentIconEnum::Globe,
                  Text::instance().TranslateSubtitles, [this]() {
-        // 对齐 Python translateSubtitle：译文.srt 卡片上以同目录原文字幕为输入
         const QFileInfo info(filePath_);
-        QString source = info.dir().filePath(QStringLiteral("原文.srt"));
-        if (!QFileInfo::exists(source)) {
-            // 原文.srt 缺失时回退到实际存在的原文（与批量任务 dispatchTask 一致，
-            // 避免投递指向不存在文件的翻译任务）
-            for (const char* name : {"原文_OCR.srt", "原文_Whisper.srt"}) {
-                const QString candidate = info.dir().filePath(QString::fromUtf8(name));
-                if (QFileInfo::exists(candidate)) {
-                    source = candidate;
-                    break;
-                }
-            }
-        }
-        emit GlobalEventBus::instance().translate_requested(
-            source, info.absoluteFilePath());
+        const QString source = projectTranslationSource(info.dir(), subtitleFormatForPath(filePath_));
+        if (!source.isEmpty())
+            emit GlobalEventBus::instance().translate_requested(source, info.absoluteFilePath());
     });
     if (canEncode) {
         auto* encode = new qfw::TransparentToolButton(qfw::FluentIconEnum::Video, this);
@@ -148,10 +138,7 @@ FileItemWidget::FileItemWidget(const QString& fileName, const QString& filePath,
         encode->setFixedSize(32, 32);
         connect(encode, &QPushButton::clicked, this, [this]() {
             const QFileInfo info(filePath_);
-            const QString output = info.dir().filePath(
-                info.fileName() == QStringLiteral("熟肉.mp4")
-                    ? QStringLiteral("熟肉_压制.mp4")
-                    : info.completeBaseName() + QStringLiteral("_.mp4"));
+            const QString output = projectEncodeOutput(info.absoluteFilePath());
             emit GlobalEventBus::instance().ffmpeg_requested(info.absoluteFilePath(), output);
         });
         row->addWidget(encode);

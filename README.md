@@ -3,11 +3,11 @@
 </p>
 
 <h1 align="center">
-  Fairy Kekkai Workshop
+  Fairy Kekkai Workshop ASS 适配功能增强版
 </h1>
 
 <p align="center">
-  <a href="https://fkw.ora-san.org/">Official Website</a>
+  <a href="https://fkw.ora-san.org/">Upstream website</a>
 </p>
 
 <p align="center">
@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  Complete project management, support for 1800+ video download sites, one-click project creation from video playlists (supports all yt-dlp supported sites), VideOCR-based video OCR (supporting PaddleOCR and Google Lens engines), Whisper speech recognition, customizable AI subtitle translation, floating on-screen capture translation, and FFmpeg-based video compression.
+  Project management, video and playlist downloads, PaddleOCR subtitle extraction, Whisper speech recognition, AI subtitle translation, floating on-screen capture translation, and FFmpeg-based video encoding.
 </p>
 
 <p align="center">
@@ -60,6 +60,15 @@
 
 
 
+## Changes from upstream
+
+3.1.0 EX is based on [Fairy Kekkai Workshop v3.1.0](https://github.com/Fairy-Oracle-Sanctuary/Fairy-Kekkai-Workshop/tree/v3.1.0) by Fairy Oracle Sanctuary.
+
+1. **Subtitle style detection.** OCR can detect subtitle color, font size and position and write them to ASS. Each option can be toggled independently.
+2. **ASS timing.** Subtitle boundaries follow the video frame rate to reduce frame offsets caused by timestamp rounding when opening an ASS file in an editor.
+3. **Subtitle burn-in.** Video encoding can burn ASS or SRT subtitles into the video and retain ASS styling.
+4. **Super-resolution and frame interpolation.** Real-ESRGAN and RIFE are included. Quality varies by source and may be modest, with oversharpening, ghosting or other artifacts. Preview a short clip before using the result in a final export.
+
 ## Features
 
 ### 📁 Project Management
@@ -79,7 +88,7 @@
 - Support for custom video quality and format
 
 ### 🔤 Subtitle Extraction (OCR)
-- Based on [VideOCR](https://github.com/timminator/VideOCR), supporting both PaddleOCR and Google Lens engines
+- Based on [VideOCR](https://github.com/timminator/VideOCR) and PaddleOCR
 - Supports 200+ languages
 - Visual subtitle area selection
 - Support for dual-area OCR (top and bottom subtitles)
@@ -142,18 +151,18 @@
 
 ### Option 1: Install directly (recommended)
 
-Download the installer matching your GPU from the [Releases](https://github.com/Fairy-Oracle-Sanctuary/Fairy-Kekkai-Workshop/releases) page and follow the setup wizard. No development environment is required.
+Download the 3.1.0 EX full installer from this repository's **Releases** and follow the setup wizard. The installer includes OCR, Whisper, and the standard super-resolution and interpolation models.
 
 - CPU: for machines without a discrete GPU / without CUDA support
-- GPU (CUDA 11.8): for Nvidia 10 series
-- GPU (CUDA 12.9): for Nvidia 16 - 50 series
+- GPU (CUDA 12.9) for compatible NVIDIA GPUs, with a CPU OCR fallback
+- Super-resolution and interpolation require a working Vulkan driver. Online downloads and translation require a network connection. Some translation providers also require API credentials.
 
 ### Option 2: Build from source (C++)
 
 #### 1. Clone the repository
 
 ```bash
-git clone https://github.com/Fairy-Oracle-Sanctuary/Fairy-Kekkai-Workshop.git
+git clone --recurse-submodules "<your EX fork URL>"
 cd Fairy-Kekkai-Workshop
 ```
 
@@ -297,7 +306,6 @@ A:
 2. Ensure PaddleOCR model files exist in the `tools/OCR.model/` directory
 3. Check if VC++ runtime is installed (requires MSVCP140.dll and VCRUNTIME140.dll)
 4. Check if GPU driver supports CUDA (if using GPU)
-5. If using Google Lens engine, ensure network connection is active
 
 ### Q: Whisper speech recognition failed
 
@@ -337,7 +345,7 @@ A:
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Video Download | ✅ | Based on yt-dlp, supports 1800+ sites |
-| Subtitle Extraction | ✅ | Based on VideOCR, supports PaddleOCR/Google Lens engines, Windows only |
+| Subtitle Extraction | ✅ | Based on VideOCR and PaddleOCR, Windows only |
 | Speech Recognition | ✅ | whisper.cpp, Windows only, real-time progress support |
 | Translation | ✅ | Multiple AI providers via HTTP APIs; provider API keys required |
 | Floating Screen Capture | ✅ | Windows only, supports window binding and following |
@@ -352,7 +360,7 @@ A:
 - **Main Application**: C++17 + Qt 6 + Qt-Fluent-Widgets (native desktop app)
 - **Image Processing**: OpenCV 4.12
 - **Video Processing**: FFmpeg + yt-dlp
-- **Subtitle Recognition**: [VideOCR](https://github.com/timminator/VideOCR) (PaddleOCR / Google Lens)
+- **Subtitle Recognition**: [VideOCR](https://github.com/timminator/VideOCR) and PaddleOCR
 - **Speech Recognition**: [ggml-org/whisper.cpp](https://github.com/ggml-org/whisper.cpp)
 - **Translation**: Multiple cloud APIs (OpenAI, Deepseek, Tencent Hunyuan, etc.)
 - **JSON**: nlohmann/json (header-only)
@@ -378,9 +386,7 @@ For detailed development guidelines, please refer to [DEVELOPMENT.md](DEVELOPMEN
 
 ## License
 
-This project is licensed under the GPL license. See the LICENSE file in the repository root for details.
-
-**Special Note**: The software icon is separately licensed under CC-BY-SA.
+The Workshop source remains under [GPLv3](LICENSE). The original icon by Fairy Oracle Sanctuary is licensed under [CC BY-SA 4.0](LICENSE-TEXT). Third-party components and models keep their own licenses. See the [component and source index](docs/WINDOWS-RELEASE.md). The optional AniSD weights are available separately under CC BY-NC 4.0.
 
 ---
 

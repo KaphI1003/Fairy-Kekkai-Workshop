@@ -134,7 +134,10 @@ QStringList BaseTaskInterface::taskGeneratedFiles(
 }
 
 void BaseTaskInterface::addTask(const QString& input, const QString& output) {
-    auto task = createTask(input, output);
+    addPreparedTask(createTask(input, output));
+}
+
+void BaseTaskInterface::addPreparedTask(const std::shared_ptr<TaskBase>& task) {
     if (!task) return;
     const QString taskPath = getTaskPath(task);
     if (inputPaths_.contains(taskPath)) {

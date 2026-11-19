@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import wordninja_enhanced as wordninja
 
@@ -24,6 +24,9 @@ class PredictedFrames:
     lines: list[list[PredictedText]]
     confidence: float  # total confidence of all words
     text: str
+    fill_rgb: tuple[int, int, int] | None
+    outline_rgb: tuple[int, int, int] | None
+    color_confidence: float | None
 
     def __init__(self, ocr_engine: str, index: int, pred_data: list[list[Any]], conf_threshold: float,
                  zone_index: int, lang: str, normalize_to_simplified_chinese: bool) -> None:
@@ -31,6 +34,9 @@ class PredictedFrames:
         self.end_index = index
         self.zone_index = zone_index
         self.lines: list[list[PredictedText]] = []
+        self.fill_rgb = None
+        self.outline_rgb = None
+        self.color_confidence = None
 
         all_words: list[PredictedText] = []
         for word_pred in pred_data[0]:
@@ -83,6 +89,76 @@ class PredictedFrames:
         #     self.text = self._converter.convert(self.text)
 
 
+def pick_color_frames(
+    frames: list[PredictedFrames], limit: int
+) -> list[PredictedFrames]:
+    """Prefer interior OCR frames, with confidence as a secondary signal."""
+    if limit <= 0 or not frames:
+        return []
+    start = min(f.start_index for f in frames)
+    end = max(f.end_index for f in frames)
+    middle = (start + end) / 2
+    span = max(1, end - start)
+    return sorted(frames, key=lambda f: (
+        abs(f.start_index - middle) / span - .20 * min(1, f.confidence),
+        f.start_index))[:limit]
+
+
+def vote_frame_colors(
+    frames: list[PredictedFrames], max_votes: int = 5
+) -> tuple[
+    tuple[int, int, int],
+    tuple[int, int, int],
+    float,
+    float,
+    int,
+]:
+    """Fuse ordered pairs by perceptual distance, not RGB bin boundaries."""
+    from .color_styles import ColorObservation, fuse_observations, pair_distance
+
+    valid = [frame for frame in frames if frame.fill_rgb is not None
+             and frame.outline_rgb is not None and (frame.color_confidence or 0) > 0]
+    valid.sort(key=lambda f: f.color_confidence or 0, reverse=True)
+    observations = [ColorObservation(f.fill_rgb, f.outline_rgb,
+                                    f.color_confidence, f.color_confidence,
+                                    f.color_confidence, 1) for f in valid[:max_votes]]
+    fused = fuse_observations(observations)
+    if fused.fill is None or fused.outline is None:
+        return (255, 255, 255), (0, 0, 0), 0.0, 0.0, 0
+    agreement = sum(pair_distance(o, fused) <= 1 for o in observations) / len(observations)
+    return fused.fill, fused.outline, fused.confidence, agreement, len(observations)
+
+
+def sample_cue_colors(
+    frames: list[PredictedFrames],
+    sample: Callable[[PredictedFrames], None],
+    min_samples: int = 2,
+    max_samples: int = 5,
+    confidence_floor: float = 0.5,
+) -> list[PredictedFrames]:
+    """Sample colors for one cue, expanding only when the first votes disagree.
+
+    The first ``min_samples`` interior frames are sampled and voted. Confident
+    agreement stops early; uncertain cues expand up to ``max_samples``.
+    """
+    candidates = [frame for frame in frames if frame.text.strip()]
+    if not candidates:
+        return []
+
+    chosen = pick_color_frames(candidates, min(max_samples, len(candidates)))
+    initial_count = min(min_samples, len(chosen))
+    for frame in chosen[:initial_count]:
+        sample(frame)
+
+    _, _, confidence, agreement, votes = vote_frame_colors(chosen[:initial_count])
+    if votes >= initial_count and agreement >= 1.0 and confidence >= confidence_floor:
+        return chosen[:initial_count]
+
+    for frame in chosen[initial_count:]:
+        sample(frame)
+    return chosen
+
+
 class PredictedSubtitle:
     frames: list[PredictedFrames]
     zone_index: int
@@ -115,6 +191,11 @@ class PredictedSubtitle:
         if self.frames:
             return self.frames[-1].end_index
         return 0
+
+    def color_pair(self) -> tuple[tuple[int, int, int], tuple[int, int, int], float]:
+        """Return a temporally voted (fill, outline, confidence) for this cue."""
+        fill, outline, confidence, _, _ = vote_frame_colors(self.frames)
+        return fill, outline, confidence
 
     def is_similar_to(self, other: PredictedSubtitle) -> bool:
         return utils.levenshtein_ratio(self.text.replace(' ', ''), other.text.replace(' ', ''), self.sim_threshold) >= self.sim_threshold

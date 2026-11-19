@@ -473,7 +473,7 @@ class Config(QConfig):
     # 跳过的帧数
     # 命令行使用：--frames_to_skip
     framesToSkip = RangeConfigItem(
-        "OCR", "FramesToSkip", 2, RangeValidator(0, 100), restart=False
+        "OCR", "FramesToSkip", 0, RangeValidator(0, 100), restart=False
     )
 
     # 最小字幕持续时间（秒）

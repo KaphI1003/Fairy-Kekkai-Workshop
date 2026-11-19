@@ -319,7 +319,7 @@ SettingInterface::SettingInterface(QWidget* parent) : qfw::ScrollArea(parent) {
             + settingData(QStringLiteral("YEAR")).toString() + QStringLiteral(", ")
             + settingData(QStringLiteral("TEAM")).toString() + QStringLiteral(". ")
             + trText("当前版本") + QStringLiteral(" v")
-            + settingData(QStringLiteral("VERSION")).toString(),
+            + settingData(QStringLiteral("DISPLAY_VERSION")).toString(),
         about);
     connect(updates, &qfw::PushSettingCard::clicked,
             &GlobalEventBus::instance(), &GlobalEventBus::checkUpdateSig);

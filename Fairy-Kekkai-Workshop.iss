@@ -1,15 +1,33 @@
-; 脚本由 Inno Setup 脚本向导生成。
+﻿; 脚本由 Inno Setup 脚本向导生成。
 ; 有关创建 Inno Setup 脚本文件的详细信息，请参阅帮助文档！
 
-#define MyAppName "Fairy Kekkai Workshop"
+#ifdef MyFork
+  #define MyAppName "Fairy Kekkai Workshop ASS 适配功能增强版"
+  #define MyAppDirName "Fairy Kekkai Workshop Fork"
+  #define MyAppPublisher "Fairy Kekkai Workshop Fork contributors"
+  #define MyAppId "{{C84B6577-FD18-4D39-99A4-E824A4826425}"
+#else
+  #define MyAppName "Fairy Kekkai Workshop"
+  #define MyAppDirName MyAppName
+  #define MyAppPublisher "Fairy Oracle Sanctuary"
+  #define MyAppId "{{0C3A7120-57EF-4142-B7E3-C94C8C0FDE46}"
+#endif
 #ifndef MyAppVersion
   #define MyAppVersion "3.0.0"
+#endif
+#ifndef MyDisplayVersion
+  #define MyDisplayVersion MyAppVersion
 #endif
 #ifndef MyVariant
   #define MyVariant "CPU-v3.7.0"
 #endif
-#define MyAppPublisher "Fairy Oracle Sanctuary"
-#define MyAppURL "https://github.com/Fairy-Oracle-Sanctuary/Fairy-Kekkai-Workshop"
+#ifndef MyAppURL
+  #ifdef MyFork
+    #define MyAppURL ""
+  #else
+    #define MyAppURL "https://github.com/Fairy-Oracle-Sanctuary/Fairy-Kekkai-Workshop"
+  #endif
+#endif
 ; 主程序名与待打包目录允许打包脚本用 /D 覆盖，同一个脚本同时服务两代程序：
 ;   Python 版（默认）：Fairy-Kekkai-Workshop.exe + dist\Fairy-Kekkai-Workshop.dist
 ;   C++ 版：           Fairy-Kekkai-Workshop-Cpp.exe + dist-cpp\Fairy-Kekkai-Workshop-Cpp.dist
@@ -21,20 +39,25 @@
 #endif
 #define MyAppAssocName MyAppName + "文件"
 #define MyAppAssocExt ".myp"
-#define MyAppAssocKey StringChange(MyAppAssocName, " ", "") + MyAppAssocExt
+#define MyAppAssocKey StringChange(MyAppDirName + "文件", " ", "") + MyAppAssocExt
+#define MyPayloadExcludes ".fkw-package-stage,.fkw-ocr-files.iss,vc_redist.x64.exe,\AppData\*,\config\*,\config.json,\project.json"
 
 [Setup]
 ; 注意：AppId 的值唯一标识此应用程序。不要在其他应用程序的安装程序中使用相同的 AppId 值。
 ; (若要生成新的 GUID，请在 IDE 中单击 "工具|生成 GUID"。)
-AppId={{0C3A7120-57EF-4142-B7E3-C94C8C0FDE46}
+AppId={#MyAppId}
 AppName={#MyAppName}
-AppVersion={#MyAppVersion}
+AppVersion={#MyDisplayVersion}
+VersionInfoVersion={#MyAppVersion}
+VersionInfoProductVersion={#MyAppVersion}
+VersionInfoProductTextVersion={#MyDisplayVersion}
+VersionInfoProductName={#MyAppName}
 ;AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
-DefaultDirName={autopf}\{#MyAppName}
+DefaultDirName={autopf}\{#MyAppDirName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ; "ArchitecturesAllowed=x64compatible" 指定安装程序无法运行
 ; 除 Arm 上的 x64 和 Windows 11 之外的任何平台上。
@@ -52,11 +75,16 @@ PrivilegesRequired=admin
 OutputBaseFilename=Fairy-Kekkai-Workshop-v{#MyAppVersion}-{#MyVariant}-Windows-x86_64-Setup
 OutputDir=Output
 SolidCompression=yes
+Compression=lzma2/max
+LZMANumBlockThreads=4
 WizardStyle=modern
 SetupIconFile=app\resource\images\logo.ico
 
 [Languages]
-#expr EmitLanguagesSection
+Name: "english"; MessagesFile: "compiler:Default.isl"
+#if FileExists(AddBackslash(CompilerPath) + "Languages\ChineseSimplified.isl")
+Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+#endif
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
@@ -71,8 +99,15 @@ Type: files; Name: "{app}\Fairy-Kekkai-Workshop.exe"
 #endif
 
 [Files]
-Source: "{#MySourceDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+#ifdef MyOcrFiles
+Source: "{#MySourceDir}\*"; DestDir: "{app}"; Excludes: "{#MyPayloadExcludes},\tools\PaddleOCR-GPU-*"; Flags: ignoreversion recursesubdirs createallsubdirs
+  #include MyOcrFiles
+#else
+Source: "{#MySourceDir}\*"; DestDir: "{app}"; Excludes: "{#MyPayloadExcludes}"; Flags: ignoreversion recursesubdirs createallsubdirs
+#endif
+#if FileExists(MySourceDir + "\vc_redist.x64.exe")
+Source: "{#MySourceDir}\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
+#endif
 ; 注意：不要在任何共享系统文件上使用 "Flags: ignoreversion" 
 
 [Registry]
@@ -85,6 +120,8 @@ Root: HKA; Subkey: "Software\Classes\{#MyAppAssocKey}\shell\open\command"; Value
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
-; [Run]
-; Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+#if FileExists(MySourceDir + "\vc_redist.x64.exe")
+[Run]
+Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing Microsoft Visual C++ Runtime..."; Flags: waituntilterminated runhidden
+#endif
 

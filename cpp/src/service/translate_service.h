@@ -12,15 +12,6 @@
 
 namespace fkw {
 
-// ---------- SRT 解析 / 组装（对齐 Python translate_service.parse_srt / assemble_srt） ----------
-struct SrtItem {
-    QString index;
-    QString time;
-    QString text;
-};
-
-QList<SrtItem> parseSrt(const QString& content);
-QString assembleSrt(const QList<SrtItem>& items);
 // 去除 <think>...</think> 思考内容（对齐 Python remove_thinking_content）。
 QString removeThinkingContent(const QString& text);
 
@@ -40,11 +31,11 @@ bool resolveProvider(const QString& ai, QString* error, TranslateProvider* provi
 // 对应 Python translate_service.TranslateTask：公共字段（taskId/fileName/outputName/
 // logPath/createTime/iconName）在 TaskBase 中，这里只补充翻译专有参数。
 struct TranslateTask : TaskBase {
-    TranslateTask(const QString& srtPath, const QString& outputPath);
+    TranslateTask(const QString& subtitlePath, const QString& outputPath);
 
     QString originLang;  // 已本地化的语言名（直接写入 prompt，对齐 Python）
     QString targetLang;
-    QString rawContent;  // SRT 原始内容
+    QString rawContent;
     QString ai;          // 对应 Python task.AI（模型标识）
     double temperature = 0.7;
     QString deepseekModel = QStringLiteral("deepseek-v4-flash");
@@ -68,9 +59,6 @@ public:
 private:
     // 执行翻译主流程，返回是否成功（取消返回 false）。
     bool translate();
-    // 翻译后处理：去除思考内容。
-    bool postProcess();
-
     std::shared_ptr<TranslateTask> task_;
     QSharedPointer<Logger> taskLogger_;
 };

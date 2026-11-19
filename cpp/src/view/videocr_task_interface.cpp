@@ -41,6 +41,10 @@ std::shared_ptr<TaskBase> OcrTaskInterface::createTask(const QString& input,
     task->useAngleCls = cfg.value(ConfigKeys::useAngleCls).toBool();
     task->postProcessing = cfg.value(ConfigKeys::postProcessing).toBool();
     task->useServerModel = cfg.value(ConfigKeys::useServerModel).toBool();
+    task->recognizeSubtitleColors = cfg.value(ConfigKeys::recognizeSubtitleColors).toBool();
+    task->recognizeSubtitlePosition = cfg.value(ConfigKeys::recognizeSubtitlePosition).toBool();
+    task->recognizeSubtitleFontSize = cfg.value(ConfigKeys::recognizeSubtitleFontSize).toBool();
+    task->subtitleGap1080p = cfg.value(ConfigKeys::subtitleGap1080p).toInt();
     task->paddleocrPath = cfg.value(ConfigKeys::paddleocrPath).toString();
     task->supportFilesPath = cfg.value(ConfigKeys::supportFilesPath).toString();
     task->tempDir = cfg.value(ConfigKeys::tempDir).toString();

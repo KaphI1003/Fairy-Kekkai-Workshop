@@ -1,0 +1,30 @@
+cmake_minimum_required(VERSION 3.21)
+project(FkwSuperresWorker LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreadedDLL)
+set(UPSTREAM "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/realesrgan-ncnn-vulkan")
+set(NCNN_ROOT "" CACHE PATH "Pinned ncnn x64 SDK")
+set(VULKAN_INCLUDE "" CACHE PATH "Vulkan headers")
+set(VULKAN_DEF "" CACHE FILEPATH "Vulkan export definition")
+if(NOT WIN32 OR NOT EXISTS "${NCNN_ROOT}/lib/ncnn.lib")
+    message(FATAL_ERROR "The superres worker requires the Windows x64 ncnn SDK")
+endif()
+file(GLOB SHADERS "${UPSTREAM}/*.comp")
+foreach(SHADER ${SHADERS})
+    get_filename_component(NAME "${SHADER}" NAME_WE)
+    set(HEADER "${CMAKE_CURRENT_BINARY_DIR}/${NAME}.comp.hex.h")
+    add_custom_command(OUTPUT "${HEADER}" COMMAND ${CMAKE_COMMAND}
+        "-DSHADER_SRC=${SHADER}" "-DSHADER_COMP_HEADER=${HEADER}"
+        -P "${UPSTREAM}/generate_shader_comp_header.cmake" DEPENDS "${SHADER}" VERBATIM)
+    list(APPEND HEADERS "${HEADER}")
+endforeach()
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/vulkan-1.lib"
+    COMMAND lib /nologo /machine:x64 "/def:${VULKAN_DEF}" "/out:${CMAKE_CURRENT_BINARY_DIR}/vulkan-1.lib"
+    DEPENDS "${VULKAN_DEF}" VERBATIM)
+add_executable(fkw-superres-worker worker.cpp "${UPSTREAM}/realesrgan.cpp"
+    ${HEADERS} "${CMAKE_CURRENT_BINARY_DIR}/vulkan-1.lib")
+target_include_directories(fkw-superres-worker PRIVATE "${UPSTREAM}" "${NCNN_ROOT}/include/ncnn" "${VULKAN_INCLUDE}" "${CMAKE_CURRENT_BINARY_DIR}")
+file(GLOB NCNN_LIBRARIES "${NCNN_ROOT}/lib/*.lib")
+target_link_libraries(fkw-superres-worker PRIVATE ${NCNN_LIBRARIES} "${CMAKE_CURRENT_BINARY_DIR}/vulkan-1.lib" ole32 windowscodecs)
+target_compile_options(fkw-superres-worker PRIVATE /utf-8 /openmp /wd4267 /wd4244)
+target_compile_definitions(fkw-superres-worker PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS)

@@ -1,10 +1,9 @@
 #include "view/translate_interface.h"
 
-#include <QFile>
+#include <QDir>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QHeaderView>
-#include <QRegularExpression>
 
 #include "common/app_data.h"
 #include "common/config.h"
@@ -13,14 +12,14 @@
 #include "common/setting.h"
 #include "common/text.h"
 #include "common/text_format.h"
+#include "service/subtitle_translation.h"
 #include "view/translate_task_interface.h"
 
 namespace fkw {
 TranslationInterface::TranslationInterface(QWidget* parent)
     : BaseFunctionInterface(trText("翻译"), qfw::FluentIconEnum::Calendar, parent) {
     setObjectName(QStringLiteral("translationInterface"));
-    setOutputSuffix(QStringLiteral("_translated.srt"));
-    setFileFilter(QStringLiteral("*.srt"));
+    setFileFilter(QStringLiteral("*.srt *.ass"));
     setSpecialFilenameMapping({{QStringLiteral("原文.srt"), QStringLiteral("译文.srt")}});
     connect(&GlobalEventBus::instance(), &GlobalEventBus::translate_requested,
             this, [this](const QString& input, const QString& output) {
@@ -78,7 +77,8 @@ TranslationInterface::TranslationInterface(QWidget* parent)
     layout->setSpacing(10);
     layout->setContentsMargins(20, 20, 20, 20);
     auto* header = new QHBoxLayout();
-    auto* title = new qfw::BodyLabel(trText("SRT 内容预览"), card);
+    auto* title = new qfw::BodyLabel(
+        trText("SRT 内容预览").replace(QStringLiteral("SRT"), QStringLiteral("SRT / ASS")), card);
     title->setStyleSheet(QStringLiteral("font-weight:bold;font-size:14px"));
     statistics_ = new qfw::BodyLabel(trText("共 0 条字幕"), card);
     statistics_->setStyleSheet(QStringLiteral("color:#666"));
@@ -97,6 +97,15 @@ TranslationInterface::TranslationInterface(QWidget* parent)
     insertPreview(card);
     connect(inputFileCard_->lineEdit, &QLineEdit::textChanged, this,
             &TranslationInterface::loadSubtitlePreview);
+}
+
+void TranslationInterface::setInputPath(const QString& path) {
+    const bool isAss = subtitleFormatForPath(path) == SubtitleFormat::Ass;
+    setOutputSuffix(isAss ? QStringLiteral("_translated.ass") : QStringLiteral("_translated.srt"));
+    BaseFunctionInterface::setInputPath(path);
+    const QFileInfo input(path);
+    if (isAss && input.completeBaseName() == QStringLiteral("原文"))
+        outputFileCard_->lineEdit->setText(input.dir().filePath(QStringLiteral("译文.ass")));
 }
 
 bool TranslationInterface::validateBeforeStart(QString* errorMessage) {
@@ -146,25 +155,32 @@ bool TranslationInterface::validateBeforeStart(QString* errorMessage) {
 
 void TranslationInterface::loadSubtitlePreview(const QString& path) {
     previewTable_->setRowCount(0);
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        statistics_->setText(trText("共 0 条字幕"));
-        return;
-    }
-    QString contents = QString::fromUtf8(file.readAll());
-    const QRegularExpression cue(QStringLiteral("(?:^|\\n)(\\d+)\\s*\\n([^\\n]+)\\n([\\s\\S]*?)(?=\\n\\s*\\n|$)"));
-    auto matches = cue.globalMatch(contents.replace(QStringLiteral("\r\n"), QStringLiteral("\n")));
-    int count = 0;
-    while (matches.hasNext() && count < 500) {
-        const auto match = matches.next();
-        previewTable_->insertRow(count);
-        previewTable_->setItem(count, 0, new QTableWidgetItem(match.captured(1)));
-        previewTable_->setItem(count, 1, new QTableWidgetItem(match.captured(2)));
-        // 对齐 Python update_preview_table：换行显示为字面量 \n
-        QString text = match.captured(3).trimmed();
-        text.replace(QLatin1Char('\n'), QStringLiteral("\\n"));
-        previewTable_->setItem(count, 2, new QTableWidgetItem(text));
-        ++count;
+    QString contents, error;
+    qsizetype count = 0;
+    const auto addRow = [this](int row, const QString& index, const QString& time, const QString& text) {
+        previewTable_->insertRow(row);
+        previewTable_->setItem(row, 0, new QTableWidgetItem(index));
+        previewTable_->setItem(row, 1, new QTableWidgetItem(time));
+        previewTable_->setItem(row, 2, new QTableWidgetItem(text));
+    };
+    constexpr qsizetype previewLimit = 500;
+    if (readSubtitleForTranslation(path, contents, error)) {
+        if (subtitleFormatForPath(path) == SubtitleFormat::Ass) {
+            const auto cues = parseAss(contents);
+            count = cues.size();
+            for (int i = 0; i < qMin(count, previewLimit); ++i) {
+                const auto& cue = cues.at(i);
+                addRow(i, QString::number(i + 1), cue.time, cue.previewText);
+            }
+        } else {
+            const auto items = parseSrt(contents);
+            count = items.size();
+            for (int i = 0; i < qMin(count, previewLimit); ++i) {
+                const auto& item = items.at(i);
+                QString text = item.text;
+                addRow(i, item.index, item.time, text.replace(u'\n', QStringLiteral("\\n")));
+            }
+        }
     }
     QString total = Text::instance().Text0SubtitlesTotal;
     statistics_->setText(total.replace(QLatin1Char('0'), QString::number(count)));

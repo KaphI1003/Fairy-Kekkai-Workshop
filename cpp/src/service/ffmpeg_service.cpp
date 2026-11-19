@@ -1,7 +1,15 @@
 #include "service/ffmpeg_service.h"
 
 #include <QDateTime>
-#include <QEventLoop>
+#include <QDir>
+#include <QTemporaryDir>
+#include "common/app_data.h"
+#include "common/setting.h"
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#else
+#include <cstdio>
+#endif
 #include <QHash>
 #include <QProcess>
 #include <QRegularExpression>
@@ -18,11 +26,6 @@ namespace fkw {
 namespace {
 
 // 解析 ffmpeg 输出（对齐 Easy-FFmpeg）
-const QRegularExpression& durationRe() {
-    static const QRegularExpression re(
-        QStringLiteral(R"(Duration: (\d{2}):(\d{2}):(\d{2}\.\d+))"));
-    return re;
-}
 const QRegularExpression& timeRe() {
     static const QRegularExpression re(
         QStringLiteral(R"(time=(\d{2}):(\d{2}):(\d{2}\.\d+))"));
@@ -64,16 +67,9 @@ double round2(double value) {
 
 }  // namespace
 
-FFmpegTask::FFmpegTask(const QString& videoPath, const QString& outputPath)
-    : TaskBase(videoPath, outputPath), saveFolder(pathDirname(outputPath)) {}
-
-bool probeHasAudio(const QString& videoPath) {
-    QProcess process;
-    process.start(ffmpegPath(), {QStringLiteral("-i"), videoPath});
-    process.waitForFinished(5000);
-    const QString output = QString::fromUtf8(process.readAllStandardError());
-    return output.contains(QStringLiteral("Audio:"));
-}
+FFmpegTask::FFmpegTask(const QString& videoPath, const QString& outputPath, const QString& subtitle)
+    : TaskBase(videoPath, outputPath), saveFolder(pathDirname(outputPath)), subtitlePath(subtitle),
+      preferGpu(boolValue(ConfigKeys::ffmpegGpuEncoding)) {}
 
 QString adjustOutputFormat(const QString& outputFile) {
     const QString outputFormat = stringValue(ConfigKeys::ffmpegOutputFormat);
@@ -94,28 +90,63 @@ QString adjustOutputFormat(const QString& outputFile) {
     return base + QLatin1Char('.') + outputFormat;
 }
 
-QPair<QStringList, QString> buildFfmpegCommand(const QString& videoPath,
-                                               const QString& outputFile,
-                                               bool hasAudio) {
-    QStringList cmd;
+// Keep the source chroma sampling and the software encoder's output bit depth.
+static QString nvencPixelFormat(const QString& codec, const QString& format, int quality) {
+    if (quality == 0) return {};
+    const bool eightBit420 = format == "yuv420p" || format == "nv12";
+    if (codec == "libx265" && (eightBit420 || format == "yuv420p10le" || format == "p010le"))
+        return "p010le";
+    if (codec == "libx264" && eightBit420 && !boolValue(ConfigKeys::ffmpegUseAdvanced))
+        return "yuv420p";
+    return {};
+}
+
+static QString nvencPreset(const QString& preset) {
+    static const QHash<QString, QString> presets{
+        {"ultrafast", "p1"}, {"superfast", "p2"}, {"veryfast", "p3"}, {"faster", "p4"},
+        {"fast", "p5"}, {"medium", "p6"}, {"slow", "p7"}, {"slower", "p7"}, {"veryslow", "p7"}
+    };
+    return presets.value(preset, "p6");
+}
+
+static QStringList buildFfmpegCommand(const FFmpegTask& task, const EncodeSource& src,
+                                      const SubtitleLayer& layer, const QString& destination,
+                                      const QString& codec, int quality, const QString& gpuFormat,
+                                      bool softwareDecode) {
+    QStringList cmd{"-nostdin", "-hide_banner", "-xerror"};
+    const bool gpu = !gpuFormat.isEmpty();
+    if (gpu) cmd << "-loglevel" << "level+info";
+    const QString container = QFileInfo(destination).suffix().toLower();
 
     // 硬件加速
-    if (boolValue(ConfigKeys::ffmpegUseHardwareAcceleration)) {
+    if (!softwareDecode && boolValue(ConfigKeys::ffmpegUseHardwareAcceleration)) {
         const QString accelerator = stringValue(ConfigKeys::ffmpegHardwareAccelerator);
         if (accelerator != QStringLiteral("auto"))
             cmd << QStringLiteral("-hwaccel") << accelerator;
     }
 
     // 输入视频
-    cmd << QStringLiteral("-i") << videoPath;
-
-    // 视频编码参数
-    cmd << QStringLiteral("-c:v") << stringValue(ConfigKeys::ffmpegVideoCodec)
-        << QStringLiteral("-crf") << QString::number(intValue(ConfigKeys::ffmpegCrf))
-        << QStringLiteral("-preset") << stringValue(ConfigKeys::ffmpegPreset);
-
-    // x264高级参数（如果启用）
-    if (boolValue(ConfigKeys::ffmpegUseAdvanced)) {
+    cmd << "-i" << task.inputPath;
+    if (!layer.script.isEmpty()) cmd << "-f" << "avisynth" << "-i" << layer.script;
+    const QString preset = stringValue(ConfigKeys::ffmpegPreset);
+    if (gpu) {
+        cmd << "-c:v" << (codec == "libx265" ? "hevc_nvenc" : "h264_nvenc")
+            << "-pix_fmt" << gpuFormat << "-preset" << nvencPreset(preset) << "-tune" << "hq"
+            << "-rc" << "vbr" << "-cq" << QString::number(quality) << "-b:v" << "0"
+            << "-multipass" << "fullres" << "-rc-lookahead" << "32" << "-g" << "300"
+            << "-bf" << "4" << "-b_ref_mode" << "middle" << "-spatial-aq" << "1";
+    } else {
+        cmd << "-c:v" << codec;
+        if (codec != "copy") cmd << "-crf" << QString::number(quality);
+        if (codec == "libx264" || codec == "libx265") cmd << "-preset" << preset;
+    }
+    if (codec == "libx265") {
+        if (container == "mp4" || container == "mov") cmd << "-tag:v" << "hvc1";
+        const QString fmt = src.video["pix_fmt"].toString();
+        if (!gpu && (fmt == "yuv420p" || fmt == "yuv422p" || fmt == "yuv444p"))
+            cmd << "-pix_fmt" << fmt + "10le";
+    }
+    if (codec == "libx264" && boolValue(ConfigKeys::ffmpegUseAdvanced)) {
         const QStringList x264Params{
             QStringLiteral("ref=") + QString::number(intValue(ConfigKeys::ffmpegRefFrames)),
             QStringLiteral("bframes=") + QString::number(intValue(ConfigKeys::ffmpegBFrames)),
@@ -130,30 +161,14 @@ QPair<QStringList, QString> buildFfmpegCommand(const QString& videoPath,
         cmd << QStringLiteral("-x264-params") << x264Params.join(QLatin1Char(':'));
     }
 
-    // 音频处理
-    const QString audioMode = stringValue(ConfigKeys::ffmpegAudioMode);
-    if (audioMode == QStringLiteral("none")) {
-        cmd << QStringLiteral("-an");  // 无音频
-    } else if (audioMode == QStringLiteral("copy")) {
-        cmd << QStringLiteral("-c:a") << QStringLiteral("copy");  // 直接复制
-    } else if (audioMode == QStringLiteral("encode") ||
-               audioMode == QStringLiteral("auto")) {
-        // 依据调用方传入的音频流探测结果决定是否编码音频
-        if (hasAudio) {
-            cmd << QStringLiteral("-c:a") << stringValue(ConfigKeys::ffmpegAudioCodec)
-                << QStringLiteral("-b:a") << stringValue(ConfigKeys::ffmpegAudioBitrate);
-        } else {
-            cmd << QStringLiteral("-an");
-        }
-    }
-
+    QString scale;
     // 视频缩放
     const QString scaleOption = stringValue(ConfigKeys::ffmpegScale);
     if (scaleOption != QStringLiteral("none")) {
         if (scaleOption == QStringLiteral("custom")) {
             const QString customScale = stringValue(ConfigKeys::ffmpegCustomScale);
             if (!customScale.isEmpty())
-                cmd << QStringLiteral("-vf") << QStringLiteral("scale=") + customScale;
+                scale = "scale=" + customScale;
         } else {
             static const QHash<QString, QString> resolutionMap{
                 {QStringLiteral("720p"), QStringLiteral("1280:720")},
@@ -163,47 +178,60 @@ QPair<QStringList, QString> buildFfmpegCommand(const QString& videoPath,
             };
             const QString resolution = resolutionMap.value(scaleOption);
             if (!resolution.isEmpty())
-                cmd << QStringLiteral("-vf") << QStringLiteral("scale=") + resolution;
+                scale = "scale=" + resolution;
         }
     }
+
+    if (layer.script.isEmpty()) {
+        cmd << "-map" << QStringLiteral("0:%1").arg(src.video["index"].toInt());
+        if (!scale.isEmpty()) cmd << "-vf" << scale;
+    } else {
+        QString graph = layer.graph;
+        if (!scale.isEmpty()) graph += ',' + scale;
+        cmd << "-filter_complex" << graph + "[video]" << "-map" << "[video]";
+        cmd << layer.colorArgs;
+    }
+
+    const QString audioMode = stringValue(ConfigKeys::ffmpegAudioMode);
+    const QString audioCodec = src.audio["codec_name"].toString();
+    const bool compatible = container == "mkv" || ((container == "mp4" || container == "mov")
+        && (audioCodec == "aac" || audioCodec == "mp3" || audioCodec == "ac3" || audioCodec == "eac3"))
+        || (container == "webm" && (audioCodec == "opus" || audioCodec == "vorbis"));
+    if (!src.audio.isEmpty() && audioMode != "none") {
+        cmd << "-map" << QStringLiteral("0:%1").arg(src.audio["index"].toInt());
+        const QString enc = audioMode == "copy" || (audioMode == "auto" && compatible)
+            ? "copy" : stringValue(ConfigKeys::ffmpegAudioCodec);
+        cmd << "-c:a" << enc;
+        if (enc != "copy") cmd << "-b:a" << stringValue(ConfigKeys::ffmpegAudioBitrate);
+    } else cmd << "-an";
 
     // 帧率设置
     const QString fpsOption = stringValue(ConfigKeys::ffmpegFps);
     if (fpsOption != QStringLiteral("source"))
         cmd << QStringLiteral("-r") << fpsOption;
+    else if (codec != "copy") cmd << "-fps_mode" << "passthrough" << "-enc_time_base:v" << "filter";
 
-    // 视频码率限制
-    const QString videoBitrate = stringValue(ConfigKeys::ffmpegVideoBitrate);
-    if (!videoBitrate.isEmpty())
-        cmd << QStringLiteral("-b:v") << videoBitrate;
-
-    // 输出格式（修正输出文件扩展名）
-    const QString output = adjustOutputFormat(outputFile);
-
-    // 覆盖输出文件
-    cmd << (boolValue(ConfigKeys::ffmpegOverwriteOutput) ? QStringLiteral("-y")
-                                                         : QStringLiteral("-n"));
-
-    // 输出文件
-    cmd << output;
-
-    return {cmd, output};
+    const QString manualLimit = stringValue(ConfigKeys::ffmpegVideoBitrate).trimmed();
+    if (codec == "libx264" || codec == "libx265") {
+        if (!manualLimit.isEmpty()) {
+            cmd << "-maxrate" << manualLimit << "-bufsize" << manualLimit;
+        } else if (boolValue(ConfigKeys::ffmpegSourceRateLimit) && src.videoBitrate > 0) {
+            const qint64 kbps = qMax<qint64>(1, qRound64(src.videoBitrate * 1.20 / 1000));
+            // Let motion borrow bits from static scenes without a large startup burst on short clips.
+            const double seconds = qBound(1.0, src.duration * 0.20, 6.0);
+            cmd << "-maxrate" << QString::number(kbps) + 'k'
+                << "-bufsize" << QString::number(qRound64(kbps * seconds)) + 'k';
+        }
+    } else if (codec == "libvpx-vp9") {
+        cmd << "-b:v" << (manualLimit.isEmpty() ? QStringLiteral("0") : manualLimit);
+    }
+    cmd << "-y" << destination;
+    return cmd;
 }
 
 FFmpegWorker::FFmpegWorker(std::shared_ptr<FFmpegTask> task)
     : TaskWorker(nullptr), task_(std::move(task)) {
     // autoDelete 关闭与 QObject 归属由 TaskWorker 基类统一处理
-}
-
-FFmpegWorker::~FFmpegWorker() {
-    // 兜底：正常路径下 run() 结束时进程已回收
-    QMutexLocker locker(&processMutex_);
-    if (process_) {
-        if (process_->state() != QProcess::NotRunning) process_->kill();
-        process_->waitForFinished(1000);
-        delete process_;
-        process_ = nullptr;
-    }
 }
 
 void FFmpegWorker::run() {
@@ -215,83 +243,114 @@ void FFmpegWorker::run() {
         QStringLiteral("ffmpeg"));
     task_->logPath = taskLogger_->logFilePath();
 
-    // 在 Worker 线程内探测音频流并构建命令（不阻塞 UI 主线程）
-    const bool hasAudio = probeHasAudio(task_->inputPath);
-    const QStringList cmd =
-        buildFfmpegCommand(task_->inputPath, task_->outputPath, hasAudio).first;
-    taskLogger_->info(QStringLiteral("args: ") + ffmpegPath() + QLatin1Char(' ') +
-                      cmd.join(QLatin1Char(' ')));
-
     emit GlobalEventBus::instance().updateTaskStatusSig(
         task_->taskId, 0, QVariant(int(TaskStatus::Processing)),
         QStringLiteral("0KiB"), 0.0, QStringLiteral("0kbits/s"), 0.0);
-
-    if (!runStage(cmd)) {
-        destroyProcess();
-        finish(false);
-    } else {
-        const int exitCode = destroyProcess();
-        const bool success = exitCode == 0 && !cancelled_.load();
-        finish(success);
-    }
-    // QObject 归属主线程，投递到主线程事件循环回收
+    QString error;
+    const bool success = !cancelled_.load() && encode(error);
+    if (!error.isEmpty()) taskLogger_->error(error);
+    finish(success);
     deleteLater();
 }
 
-bool FFmpegWorker::runStage(const QStringList& args) {
-    // 执行单阶段 ffmpeg，返回是否成功启动。
-    // QEventLoop 阻塞同步化，规避 QRunnable 线程内 QProcess 信号投递丢失；
-    // process_ 始终指向当前进程，便于取消时 kill。
-    duration_ = 0.0;
-    lastEmit_ = 0.0;
-    stderrBuffer_.clear();
-    durationFrozen_ = false;
-
-    {
-        QMutexLocker locker(&processMutex_);
-        process_ = new QProcess();  // 创建于 Worker 线程，信号在本线程分发
+bool FFmpegWorker::encode(QString& error) {
+    const QFileInfo out(task_->outputPath);
+    const bool overwrite = boolValue(ConfigKeys::ffmpegOverwriteOutput);
+    if (out.exists() && (!overwrite || out == QFileInfo(task_->inputPath) || out == QFileInfo(task_->subtitlePath))) {
+        error = QStringLiteral("输出路径与输入相同，或现有文件受覆盖设置保护：") + out.absoluteFilePath();
+        return false;
     }
-    // DirectConnection 与 Python 的 QRunnable 用法一致：回调在 Worker 线程同步执行
-    connect(process_, &QProcess::readyReadStandardError, this,
-            &FFmpegWorker::handleStderr, Qt::DirectConnection);
-    QEventLoop loop;
-    connect(process_, &QProcess::finished, &loop, &QEventLoop::quit,
-            Qt::DirectConnection);
-    process_->start(ffmpegPath(), args);
-    if (!process_->waitForStarted()) return false;
-    loop.exec();
-    return true;
+    QTemporaryDir work(out.dir().filePath(QStringLiteral(".fkw-encode-XXXXXX")));
+    if (!work.isValid()) { error = work.errorString(); return false; }
+    QString probe = QFileInfo(ffmpegPath()).dir().filePath("ffprobe" + executableSuffix());
+    if (!QFileInfo(probe).isFile()) probe = QDir(sourceRoot()).filePath("tools/ffprobe" + executableSuffix());
+    EncodeSource src;
+    if (!probeEncodeSource(probe, task_->inputPath, src, error)) return false;
+    duration_ = src.duration;
+    const QString codec = stringValue(ConfigKeys::ffmpegVideoCodec);
+    const int quality = intValue(ConfigKeys::ffmpegCrf);
+    SubtitleLayer layer;
+    if (!task_->subtitlePath.isEmpty()) {
+        if (codec == "copy") {
+            error = QStringLiteral("烧录字幕需要视频编码器，请在压制高级设置中选择 H.265 或 H.264。");
+            return false;
+        }
+        const QString plugin = QDir(sourceRoot()).filePath("tools/vsfiltermod/VSFilterMod.dll");
+        if (!makeSubtitleLayer(src, task_->subtitlePath, plugin, work.path(), layer, error)) return false;
+        taskLogger_->info(layer.description);
+    }
+    const QString staged = work.filePath("output." + out.suffix());
+    const QString gpuFormat = task_->preferGpu
+        ? nvencPixelFormat(codec, src.video["pix_fmt"].toString(), quality) : QString();
+    const auto attempt = [&](const QString& format, bool softwareDecode, bool* nvencFailed) {
+        const auto args = buildFfmpegCommand(*task_, src, layer, staged, codec, quality, format, softwareDecode);
+        taskLogger_->info(ffmpegPath() + ' ' + args.join(' '));
+        return !cancelled_.load() && runStage(args, nvencFailed);
+    };
+    bool nvencFailed = false;
+    if (task_->preferGpu && gpuFormat.isEmpty())
+        taskLogger_->info(QStringLiteral("当前编码设置或片源像素格式使用原编码方式：") + codec);
+    if (!attempt(gpuFormat, false, gpuFormat.isEmpty() ? nullptr : &nvencFailed)) {
+        if (!nvencFailed || cancelled_.load()) return false;
+        taskLogger_->warning(QStringLiteral("NVENC 不可用，使用 CPU 从头压制：") + codec);
+        lastEmit_ = 0;
+        if (!attempt({}, true, nullptr)) return false;
+    }
+    if (cancelled_.load()) return false;
+#ifdef Q_OS_WIN
+    const bool moved = MoveFileExW(reinterpret_cast<LPCWSTR>(staged.utf16()),
+        reinterpret_cast<LPCWSTR>(out.absoluteFilePath().utf16()), overwrite ? MOVEFILE_REPLACE_EXISTING : 0);
+#else
+    const bool moved = overwrite ? std::rename(QFile::encodeName(staged), QFile::encodeName(out.absoluteFilePath())) == 0
+                                 : QFile::rename(staged, out.absoluteFilePath());
+#endif
+    if (!moved) error = QStringLiteral("成片写入失败，目标文件可能正被占用：") + out.absoluteFilePath();
+    return moved;
+}
+
+bool FFmpegWorker::runStage(const QStringList& args, bool* nvencFailed) {
+    QProcess process;
+#ifdef Q_OS_WIN
+    // VSFilterMod uses the system ANSI code page for AviSynth paths.
+    process.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* a) {
+        a->flags |= CREATE_NO_WINDOW;
+    });
+#endif
+    if (!task_->subtitlePath.isEmpty())
+        process.setWorkingDirectory(QFileInfo(task_->subtitlePath).absolutePath());
+    auto env = QProcessEnvironment::systemEnvironment();
+    env.insert("PATH", QDir(sourceRoot()).filePath("tools") + QDir::listSeparator() + env.value("PATH"));
+    process.setProcessEnvironment(env);
+    process.start(ffmpegPath(), args);
+    if (!process.waitForStarted()) { taskLogger_->error(process.errorString()); return false; }
+    // Only retry hardware initialization or encoding errors. Input, subtitle and disk
+    // failures still report their original error without replaying the whole job.
+    static const QRegularExpression gpuError(QStringLiteral(
+        R"(\[(?:hevc|h264)_nvenc @[^\]]*\]\s*\[(?:error|fatal|panic)\]|)"
+        R"(No device available for decoder|Device setup failed for decoder|)"
+        R"(Unknown encoder '(?:hevc|h264)_nvenc'|)"
+        R"(Unrecognized option '(?:rc|cq|multipass|rc-lookahead|spatial-aq|b_ref_mode)')"),
+        QRegularExpression::CaseInsensitiveOption);
+    QString tail;
+    do {
+        if (cancelled_.load()) { process.kill(); process.waitForFinished(); return false; }
+        process.waitForFinished(150);
+        const QString data = QString::fromUtf8(process.readAllStandardError());
+        if (!data.isEmpty()) {
+            if (nvencFailed && !*nvencFailed) {
+                tail += data;
+                *nvencFailed = gpuError.match(tail).hasMatch();
+                tail = tail.right(512);
+            }
+            parseProgress(data);
+            taskLogger_->info(data);
+        }
+    } while (process.state() != QProcess::NotRunning);
+    return process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
 }
 
 void FFmpegWorker::cancel() {
     cancelled_.store(true);
-    QMutexLocker locker(&processMutex_);
-    if (process_) process_->kill();
-}
-
-int FFmpegWorker::destroyProcess() {
-    QMutexLocker locker(&processMutex_);
-    if (!process_) return -1;
-    const int exitCode = process_->exitCode();
-    if (process_->state() != QProcess::NotRunning) process_->kill();
-    delete process_;
-    process_ = nullptr;
-    return exitCode;
-}
-
-void FFmpegWorker::tryParseDuration(const QString& data) {
-    // 解析视频总时长：多输入时累加所有 Duration 求和，time= 出现后冻结
-    double total = 0.0;
-    bool matched = false;
-    auto it = durationRe().globalMatch(data);
-    while (it.hasNext()) {
-        const auto match = it.next();
-        matched = true;
-        total += match.captured(1).toInt() * 3600 + match.captured(2).toInt() * 60 +
-                 match.captured(3).toDouble();
-    }
-    if (matched) duration_ = total;
-    if (timeRe().match(data).hasMatch()) durationFrozen_ = true;
 }
 
 void FFmpegWorker::parseProgress(const QString& data) {
@@ -323,18 +382,6 @@ void FFmpegWorker::parseProgress(const QString& data) {
     emit GlobalEventBus::instance().updateTaskStatusSig(
         task_->taskId, progress, QVariant(int(TaskStatus::Processing)), size,
         current, bitrate, speed);
-}
-
-void FFmpegWorker::handleStderr() {
-    // ffmpeg 全部输出到 stderr
-    const QString data = QString::fromUtf8(process_->readAllStandardError());
-    // 编码开始前累积 stderr 用于时长解析；time= 出现后停止累积防内存增长
-    if (!durationFrozen_) {
-        stderrBuffer_ += data;
-        tryParseDuration(stderrBuffer_);
-    }
-    parseProgress(data);
-    taskLogger_->info(data);
 }
 
 void FFmpegWorker::finish(bool success) {

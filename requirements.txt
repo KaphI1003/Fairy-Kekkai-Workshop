@@ -14,6 +14,8 @@ simplejpeg @ https://github.com/timminator/simplejpeg/releases/download/v1.9.1/s
 
 # Numerical Computing
 numpy>=1.24.0
+# Fast 8-connected component labelling for subtitle color detection
+scipy>=1.10.0
 
 # HTTP Requests
 requests>=2.31.0

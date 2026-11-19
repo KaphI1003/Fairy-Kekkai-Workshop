@@ -2,6 +2,7 @@
 #include <QJsonValue>
 #include <QList>
 #include <QString>
+#include <QStringList>
 namespace fkw {
 // 下拉选项：value 为写入 config 的原始值，label 为界面显示文案。
 struct TranslateOption {
@@ -20,6 +21,10 @@ bool isPaddleOcrCpu();
 // 当前版本 PaddleOCR 可执行文件的默认位置（tools/<版本>/paddleocr[.exe]）；
 // 根目录 PADDLEOCR 缺失时退化为 tools/paddleocr[.exe]。
 QString paddleOcrDefaultPath();
+// 同一代 CPU / CUDA 引擎可并存；PADDLEOCR 仅保留安装包与更新类型。
+QStringList paddleOcrEngineNames(const QString& version);
+QString paddleOcrCpuDefaultPath();
+QString paddleOcrGpuDefaultPath();
 // 当前版本识别模型 support.files 的目录名，供默认值与启动体检共用。
 QString paddleOcrSupportFilesName();
 // 当前版本模型目录的默认位置（tools/<supportFilesName>）。

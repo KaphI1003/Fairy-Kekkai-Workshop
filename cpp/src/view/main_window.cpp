@@ -22,6 +22,8 @@
 #include "components/teaching_tips.h"
 #include "view/download_interface.h"
 #include "view/ffmpeg_interface.h"
+#include "view/superres_interface.h"
+#include "view/interpolation_interface.h"
 #include "view/home_interface.h"
 #include "view/log_interface.h"
 #include "view/project_stacked_interface.h"
@@ -80,7 +82,7 @@ namespace fkw
     MainWindowT<WindowType>::MainWindowT(QWidget* parent) : WindowType(parent)
     {
         this->setObjectName(QStringLiteral("MainWindow"));
-        this->setWindowTitle(QStringLiteral("Fairy Kekkai Workshop"));
+        this->setWindowTitle(QStringLiteral("Fairy Kekkai Workshop ASS 适配功能增强版"));
         this->setWindowIcon(QIcon(QStringLiteral(":/app/images/logo.png")));
         refreshBackground();
         this->resize(960, 754);
@@ -133,6 +135,8 @@ namespace fkw
         auto *whisper = new WhisperStackedInterfaces(this);
         auto *translate = new TranslateStackedInterfaces(this);
         auto *ffmpeg = new FFmpegStackedInterfaces(this);
+        auto *superres = new SuperresStackedInterfaces(this);
+        auto *interpolation = new InterpolationStackedInterfaces(this);
         auto *settings = new SettingInterface(this);
         QObject::connect(settings, &SettingInterface::tutorialRequested, this, [this]() {
             startTutorial();
@@ -146,8 +150,10 @@ namespace fkw
         this->addSubInterface(whisper, qfw::FluentIconEnum::Microphone, trText("语音"), top);
         this->addSubInterface(translate, qfw::FluentIconEnum::Message, trText("翻译"), top);
         this->addSubInterface(ffmpeg, qfw::FluentIconEnum::ZipFolder, trText("压制"), top);
+        this->addSubInterface(superres, qfw::FluentIconEnum::ZoomIn, trText("超分"), top);
+        this->addSubInterface(interpolation, qfw::FluentIconEnum::Video, trText("补帧"), top);
         this->addSubInterface(settings, qfw::FluentIconEnum::Setting, trText("设置"), bottom);
-        routes_ = {{QStringLiteral("home"), home}, {QStringLiteral("projects"), projects}, {QStringLiteral("download"), download}, {QStringLiteral("ocr"), ocr}, {QStringLiteral("whisper"), whisper}, {QStringLiteral("translate"), translate}, {QStringLiteral("ffmpeg"), ffmpeg}, {QStringLiteral("settings"), settings}};
+        routes_ = {{QStringLiteral("home"), home}, {QStringLiteral("projects"), projects}, {QStringLiteral("download"), download}, {QStringLiteral("ocr"), ocr}, {QStringLiteral("whisper"), whisper}, {QStringLiteral("translate"), translate}, {QStringLiteral("ffmpeg"), ffmpeg}, {QStringLiteral("superres"), superres}, {QStringLiteral("interpolation"), interpolation}, {QStringLiteral("settings"), settings}};
         splashScreen_->setProgress(80, Text::instance().IST);
         versionService_ = new VersionService(this);
         QObject::connect(versionService_, &VersionService::checked, this,

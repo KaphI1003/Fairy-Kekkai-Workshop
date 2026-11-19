@@ -6,6 +6,7 @@ class TranslationInterface : public BaseFunctionInterface {
     Q_OBJECT
 public:
     explicit TranslationInterface(QWidget* parent = nullptr);
+    void setInputPath(const QString& path) override;
 protected:
     bool validateBeforeStart(QString* errorMessage) override;
 private:

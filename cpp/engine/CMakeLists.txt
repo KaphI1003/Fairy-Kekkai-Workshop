@@ -1,0 +1,31 @@
+cmake_minimum_required(VERSION 3.21)
+project(FkwRifeBridge LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreadedDLL)
+set(RIFE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/rife-ncnn-vulkan")
+set(NCNN_ROOT "" CACHE PATH "Pinned ncnn x64 SDK")
+set(VULKAN_INCLUDE "" CACHE PATH "Vulkan headers include directory")
+set(VULKAN_DEF "" CACHE FILEPATH "Vulkan loader export definition")
+if(NOT WIN32 OR NOT EXISTS "${NCNN_ROOT}/lib/ncnn.lib")
+    message(FATAL_ERROR "Use scripts/build-rife-bridge.ps1 with the Windows x64 SDK")
+endif()
+file(GLOB SHADERS "${RIFE_DIR}/*.comp")
+set(HEADERS)
+foreach(SHADER ${SHADERS})
+    get_filename_component(NAME "${SHADER}" NAME_WE)
+    set(HEADER "${CMAKE_CURRENT_BINARY_DIR}/${NAME}.comp.hex.h")
+    add_custom_command(OUTPUT "${HEADER}" COMMAND ${CMAKE_COMMAND}
+        "-DSHADER_SRC=${SHADER}" "-DSHADER_COMP_HEADER=${HEADER}"
+        -P "${RIFE_DIR}/generate_shader_comp_header.cmake" DEPENDS "${SHADER}" VERBATIM)
+    list(APPEND HEADERS "${HEADER}")
+endforeach()
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/vulkan-1.lib"
+    COMMAND lib /nologo /machine:x64 "/def:${VULKAN_DEF}" "/out:${CMAKE_CURRENT_BINARY_DIR}/vulkan-1.lib"
+    DEPENDS "${VULKAN_DEF}" VERBATIM)
+add_executable(fkw-rife-bridge rife_bridge.cpp "${RIFE_DIR}/rife.cpp" "${RIFE_DIR}/warp.cpp"
+    ${HEADERS} "${CMAKE_CURRENT_BINARY_DIR}/vulkan-1.lib")
+target_include_directories(fkw-rife-bridge PRIVATE "${RIFE_DIR}" "${NCNN_ROOT}/include/ncnn" "${VULKAN_INCLUDE}" "${CMAKE_CURRENT_BINARY_DIR}")
+file(GLOB NCNN_LIBRARIES "${NCNN_ROOT}/lib/*.lib")
+target_link_libraries(fkw-rife-bridge PRIVATE ${NCNN_LIBRARIES} "${CMAKE_CURRENT_BINARY_DIR}/vulkan-1.lib" ole32 windowscodecs)
+target_compile_options(fkw-rife-bridge PRIVATE /utf-8 /openmp /wd4267 /wd4244)
+target_compile_definitions(fkw-rife-bridge PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS)

@@ -1,3 +1,4 @@
+#include "service/subtitle_encode.h"
 #include "components/dialog.h"
 
 #include <QGridLayout>
@@ -299,7 +300,7 @@ void BatchTaskDialog::updateEpisodes() {
                     || QFileInfo::exists(dir.filePath(QStringLiteral("原文_OCR.srt")))
                     || QFileInfo::exists(dir.filePath(QStringLiteral("原文_Whisper.srt"))));
         else
-            eligible = QFileInfo::exists(dir.filePath(QStringLiteral("熟肉.mp4")));
+            eligible = !projectEncodeInput(dir.absolutePath()).isEmpty();
         if (!eligible) continue;
         auto* choice = new qfw::CheckBox(
             QStringLiteral("第 %1 集  %2").arg(episode.folderNum).arg(episode.title), this);

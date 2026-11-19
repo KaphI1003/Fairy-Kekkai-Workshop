@@ -1,12 +1,14 @@
 #include "view/translate_task_interface.h"
 
-#include <QFile>
+#include <QFileInfo>
 
 #include "common/config.h"
 #include "common/config_keys.h"
 #include "common/event_bus.h"
 #include "common/setting.h"
 #include "common/text.h"
+#include "components/notification_service.h"
+#include "service/subtitle_translation.h"
 #include "service/translate_service.h"
 
 namespace fkw {
@@ -17,12 +19,21 @@ TranslateTaskInterface::TranslateTaskInterface(QWidget* parent)
 
 std::shared_ptr<TaskBase> TranslateTaskInterface::createTask(const QString& input,
                                                              const QString& output) {
-    // 对齐 Python TranslationInterface._get_args：读取 SRT 原文并快照当前配置。
-    // 读取失败时返回 nullptr，任务不会被添加。
-    QFile file(input);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return nullptr;
+    const bool inputAss = subtitleFormatForPath(input) == SubtitleFormat::Ass;
+    const bool outputAss = subtitleFormatForPath(output) == SubtitleFormat::Ass;
+    QString content, error;
+    if (inputAss != outputAss)
+        error = trText("ASS 翻译的输入和输出都必须使用 .ass 扩展名");
+    else if (inputAss && QFileInfo(input) == QFileInfo(output))
+        error = trText("请为译文选择与原文不同的文件");
+    else
+        readSubtitleForTranslation(input, content, error);
+    if (!error.isEmpty()) {
+        NotificationService::error(Text::instance().Error, error);
+        return nullptr;
+    }
     auto task = std::make_shared<TranslateTask>(input, output);
-    task->rawContent = QString::fromUtf8(file.readAll());
+    task->rawContent = std::move(content);
 
     const auto& cfg = AppConfig::instance();
     task->originLang =

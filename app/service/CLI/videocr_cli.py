@@ -121,6 +121,48 @@ def main() -> None:
         help="Output SRT file path (default: subtitle.srt)",
     )
     parser.add_argument(
+        "--frame_report",
+        type=str,
+        default="",
+        help="Optional JSON path with start/end-boundary/last-visible frame numbers",
+    )
+    parser.add_argument(
+        "--ass_output",
+        type=str,
+        default="",
+        help="Optional ASS path (default: same basename as --output, .ass)",
+    )
+    parser.add_argument(
+        "--no_ass",
+        action="store_true",
+        help="Do not write the frame-generated ASS sidecar",
+    )
+    parser.add_argument(
+        "--no_color_styles",
+        action="store_true",
+        help="Use one default ASS style instead of per-color styles",
+    )
+    parser.add_argument(
+        "--no_subtitle_position", action="store_true",
+        help="Use the default vertical position in ASS",
+    )
+    parser.add_argument(
+        "--no_subtitle_font_size", action="store_true",
+        help="Use the default font size in ASS",
+    )
+    parser.add_argument(
+        "--subtitle_gap_1080p", type=restricted_int(0, 100), default=8,
+        help="Gap above the original subtitles in pixels at 1080p (default: 8)",
+    )
+    parser.add_argument(
+        "--color_style_budget", type=restricted_float(min_val=1.0), default=360.0,
+        help="Soft CPU colour-analysis budget in seconds; reduce retries near the limit (default: 360)",
+    )
+    parser.add_argument(
+        "--color_report", type=valid_output_path, default="",
+        help="Optional JSON colour diagnostics and timing report (requires coloured ASS output)",
+    )
+    parser.add_argument(
         "--ocr_engine",
         type=str,
         choices=["paddleocr", "google_lens"],
@@ -205,8 +247,8 @@ def main() -> None:
     parser.add_argument(
         "--frames_to_skip",
         type=restricted_int(min_val=0),
-        default=1,
-        help="Frames to skip (default: 1)",
+        default=0,
+        help="Frames to skip (default: 0)",
     )
     parser.add_argument(
         "--normalize_to_simplified_chinese",
@@ -393,6 +435,15 @@ def main() -> None:
                 paddleocr_path=args.paddleocr_path or None,
                 support_files_path=args.supportFilesPath or None,
                 temp_dir=args.tempDir or None,
+                frame_report_path=args.frame_report or None,
+                ass_output_path=args.ass_output or None,
+                write_ass=not args.no_ass,
+                color_styles=not args.no_color_styles,
+                color_style_budget=args.color_style_budget,
+                color_report_path=args.color_report or None,
+                subtitle_position_styles=not args.no_subtitle_position,
+                subtitle_font_size_styles=not args.no_subtitle_font_size,
+                subtitle_gap_1080p=args.subtitle_gap_1080p,
             )
     except ValueError as e:
         print(f"Error: {e}")

@@ -8,6 +8,7 @@ class FFmpegTaskInterface : public BaseTaskInterface {
     Q_OBJECT
 public:
     explicit FFmpegTaskInterface(QWidget* parent = nullptr);
+    void addSubtitleTask(const QString& input, const QString& output, const QString& subtitle);
 protected:
     std::shared_ptr<TaskBase> createTask(const QString& input,
                                          const QString& output) override;

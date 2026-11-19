@@ -58,6 +58,9 @@ cover/
 
 # Django stuff:
 *.log
+/baseline-backpressure.txt
+/decoder-repair-tests.txt
+/fixed-superres-tests.txt
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
@@ -221,10 +224,15 @@ __marimo__/
 
 # 
 tools/
+!/tools/
+/tools/*
+!/tools/vsfiltermod/
+/tools/vsfiltermod/*.dll
 AppData/
 
 # C++ build artifacts
 /build-cpp-release/
+/build-cpp-superres-opt/
 /work/
 /dist-cpp/
 /opencv/
@@ -252,6 +260,14 @@ scripts/*
 # 其余 scripts/ 下的本地辅助脚本继续忽略
 !scripts/check-release-notes.py
 !scripts/stage-whisper.ps1
+!scripts/stage-ocr.ps1
+!scripts/stage-superres.ps1
+!scripts/build-superres-worker.ps1
+!scripts/stage-interpolation.ps1
+!scripts/build-rife-bridge.ps1
+!scripts/prepare-release-tools.ps1
+!scripts/videocr-release-requirements.txt
+!scripts/package-release-source.py
 .upstream_videocr/
 CPP_REWRITE_PLAN.md
 videocr_text_mask_filter_plan.md

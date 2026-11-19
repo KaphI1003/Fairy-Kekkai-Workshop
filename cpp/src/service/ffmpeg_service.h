@@ -1,7 +1,6 @@
 #pragma once
 
-#include <QMutex>
-#include <QPair>
+#include "service/subtitle_encode.h"
 #include <QSharedPointer>
 #include <QString>
 #include <QStringList>
@@ -10,8 +9,6 @@
 #include "common/logger.h"
 #include "service/task_base.h"
 
-class QProcess;
-
 namespace fkw {
 
 // 对应 app/service/ffmpeg_service.py 的 FFmpegTask：纯数据类，字段对齐
@@ -19,33 +16,23 @@ namespace fkw {
 // TaskBase 中，这里只补充压制专有参数。Python 中任务对象被界面/卡片/Worker
 // 共享引用，这里用 shared_ptr 表达同一语义。
 struct FFmpegTask : TaskBase {
-    FFmpegTask(const QString& videoPath, const QString& outputPath);
+    FFmpegTask(const QString& videoPath, const QString& outputPath, const QString& subtitle = {});
 
     QString saveFolder;
+    QString subtitlePath;
+    bool preferGpu;
 };
-
-// 检测输入文件是否有音频流（同步探测，5 秒超时）。
-// 与 Python 一致：只允许在 Worker 线程内调用，避免主线程阻塞。
-bool probeHasAudio(const QString& videoPath);
 
 // 根据配置修正输出文件扩展名（纯函数，无 I/O）。
 QString adjustOutputFormat(const QString& outputFile);
 
-// 根据配置构建 FFmpeg 参数列表（纯函数，不做任何探测）。
-// hasAudio 必须由调用方显式传入（在 Worker 线程内探测）。
-// 返回 {参数列表(不含可执行文件路径), 修正扩展名后的输出文件}。
-QPair<QStringList, QString> buildFfmpegCommand(const QString& videoPath,
-                                               const QString& outputFile,
-                                               bool hasAudio);
-
-// FFmpeg 压制执行引擎（对齐 Easy-FFmpeg：QEventLoop 同步化 + event_bus 上报）。
+// FFmpeg 压制任务在工作线程内探测片源、合成字幕并提交成片。
 // 由 QThreadPool 调度并在 run() 结束后 deleteLater() 回收，
 // 外部若需持有引用请使用 QPointer。
 class FFmpegWorker : public TaskWorker {
     Q_OBJECT
 public:
     explicit FFmpegWorker(std::shared_ptr<FFmpegTask> task);
-    ~FFmpegWorker() override;
 
     void run() override;
 
@@ -54,23 +41,16 @@ public:
     void cancel() override;
 
 private:
-    bool runStage(const QStringList& args);
-    void tryParseDuration(const QString& data);
+    bool runStage(const QStringList& args, bool* nvencFailed = nullptr);
     void parseProgress(const QString& data);
-    void handleStderr();
+    bool encode(QString& error);
     void finish(bool success);
-    // 回收当前进程并返回其退出码（进程不存在时返回 -1）。
-    int destroyProcess();
 
     std::shared_ptr<FFmpegTask> task_;
     double duration_ = 0.0;
     double lastEmit_ = 0.0;
     QSharedPointer<Logger> taskLogger_;
-    QProcess* process_ = nullptr;
-    QMutex processMutex_;
-    // 编码开始前累积 stderr，供时长解析反复求和所有 Duration
-    QString stderrBuffer_;
-    bool durationFrozen_ = false;
+
 };
 
 }  // namespace fkw

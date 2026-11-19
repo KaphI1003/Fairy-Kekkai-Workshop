@@ -19,7 +19,7 @@ namespace fkw {
 
 // 对应 app/service/ocr_service.py 的 OCRTask：公共字段（taskId/fileName/
 // outputName/logPath/createTime）在 TaskBase 中，这里补充 OCR 专有参数快照
-//（对应 Python 任务对象里的 args 字典，创建时取配置，运行期不变）。
+//（设备和引擎路径在启动时读取，其余识别参数在创建时取配置）。
 struct OcrTask : TaskBase {
     OcrTask(const QString& videoPath, const QString& outputPath);
 
@@ -34,8 +34,12 @@ struct OcrTask : TaskBase {
     double maxMergeGapSec = 0.1;     // --max_merge_gap
     double ssimThreshold = 90;       // --ssim_threshold
     int ocrImageMaxWidth = 1280;     // --ocr_image_max_width
-    int framesToSkip = 2;            // --frames_to_skip
+    int framesToSkip = 0;            // --frames_to_skip
     bool postProcessing = false;     // --post_processing
+    bool recognizeSubtitleColors = true;  // false: --no_color_styles
+    bool recognizeSubtitlePosition = true;
+    bool recognizeSubtitleFontSize = true;
+    int subtitleGap1080p = 8;
     double minSubtitleDurationSec = 0.2;  // --min_subtitle_duration
     int confidenceThreshold = 30;    // --conf_threshold
     // Python 侧硬编码项（_get_args：use_fullframe=False / subtitle_position="center"）

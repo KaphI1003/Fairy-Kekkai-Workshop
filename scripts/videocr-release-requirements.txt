@@ -1,0 +1,8 @@
+av==18.1.0
+fast-ssim==1.4.0
+Nuitka==4.3.5
+numpy==2.4.6
+scipy==1.17.1
+simplejpeg @ https://github.com/timminator/simplejpeg/releases/download/v1.9.1/simplejpeg-1.9.1-cp311-abi3-win_amd64.whl#sha256=2a7eb1d99e0f2a910784d898a951079ad1214f0be35629b0ecfe02ad92019a75
+wakepy==1.0.0
+wordninja-enhanced==3.2.0

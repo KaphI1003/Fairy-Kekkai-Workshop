@@ -91,9 +91,12 @@ bool isNumericName(const QString& name, int* number) {
     if (number) *number = value;
     return true;
 }
+bool readProjectFile(const QString& filePath, Document* doc, QString* error,
+                     bool requireTerminator);
+
 bool parsesAsDocument(const QString& filePath) {
     Document document;
-    return readFile(filePath, &document, nullptr);
+    return readProjectFile(filePath, &document, nullptr, true);
 }
 // 数字目录是否恰好构成连续的 1..n（如 1 2 3）；出现 1 2 4 这类中间缺失即返回 false
 bool isContiguousSequence(const QVector<int>& numbers) {
@@ -306,7 +309,9 @@ bool importProject(const QString& path, bool copy, QString* error) {
     list << path;
     return setLinks(list, error);
 }
-bool readFile(const QString& filePath, Document* doc, QString* error) {
+namespace {
+bool readProjectFile(const QString& filePath, Document* doc, QString* error,
+                     bool requireTerminator) {
     if (!doc) return fail(error, QStringLiteral("缺少输出参数"));
     QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly)) return fail(error, file.errorString());
@@ -331,8 +336,17 @@ bool readFile(const QString& filePath, Document* doc, QString* error) {
         ep.videoUrl = lines.at(start + stride - 2);
         result.episodes.append(ep);
     }
+    // An arbitrary text file can have the same blank-line pattern as a title file.
+    // Require the project footer only when guessing from a renamed file.
+    const int footer = separator + 1 + result.episodes.size() * stride;
+    if (requireTerminator && lines.mid(footer).join(QLatin1Char('\n')).trimmed() != QStringLiteral("---"))
+        return false;
     *doc = result;
     return true;
+}
+}
+bool readFile(const QString& filePath, Document* doc, QString* error) {
+    return readProjectFile(filePath, doc, error, false);
 }
 bool read(const QString& path, Document* doc, QString* error) {
     return readFile(QDir(path).filePath(QStringLiteral("标题.txt")), doc, error);
