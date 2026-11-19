@@ -40,7 +40,7 @@
 #define MyAppAssocName MyAppName + "文件"
 #define MyAppAssocExt ".myp"
 #define MyAppAssocKey StringChange(MyAppDirName + "文件", " ", "") + MyAppAssocExt
-#define MyPayloadExcludes ".fkw-package-stage,.fkw-ocr-files.iss,vc_redist.x64.exe,\AppData\*,\config\*,\config.json,\project.json"
+#define MyPayloadExcludes ".fkw-package-stage,.fkw-ocr-files.iss,vc_redist.x64.exe,\AppData\*,\config\*,\config.json,\project.json,\project,\project\*,\Projects,\Projects\*,\Fairy-Kekkai-Workshop-Projects,\Fairy-Kekkai-Workshop-Projects\*"
 
 [Setup]
 ; 注意：AppId 的值唯一标识此应用程序。不要在其他应用程序的安装程序中使用相同的 AppId 值。
@@ -124,4 +124,54 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 [Run]
 Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing Microsoft Visual C++ Runtime..."; Flags: waituntilterminated runhidden
 #endif
+
+[CustomMessages]
+english.CleanupIncomplete=Some Workshop files could not be cleaned up. Your project folders have been preserved.
+#if FileExists(AddBackslash(CompilerPath) + "Languages\ChineseSimplified.isl")
+chinesesimp.CleanupIncomplete=部分软件文件未能清理。视频项目文件夹已保留。
+#endif
+
+[Code]
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Script, Filename, Params, OtherEdition: String;
+  ResultCode: Integer;
+  Success: Boolean;
+begin
+  if CurUninstallStep <> usPostUninstall then Exit;
+  { Embed the cleanup code so it survives removal of the installed files. }
+  Script := '';
+#define CleanupHandle
+#sub AddCleanupLine
+  #emit "  Script := Script + '" + StringChange(FileRead(CleanupHandle), "'", "''") + "' + #13#10;"
+#endsub
+#for {CleanupHandle = FileOpen(AddBackslash(SourcePath) + "scripts\uninstall-cleanup.ps1"); CleanupHandle && !FileEof(CleanupHandle); ""} AddCleanupLine
+#if !CleanupHandle
+  #error Unable to read uninstall-cleanup.ps1
+#endif
+#call FileClose(CleanupHandle)
+  Filename := ExpandConstant('{tmp}\fkw-uninstall-cleanup.ps1');
+  Success := SaveStringToFile(Filename, Utf8Encode(#$FEFF + Script), False);
+  if Success then begin
+    Params := '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + Filename +
+      '" -InstallDir "' + AddBackslash(ExpandConstant('{app}')) + '." -UserDataDir "' +
+      ExpandConstant('{localappdata}\Fairy-Oracle-Sanctuary\Fairy-Kekkai-Workshop') + '"';
+#ifdef MyFork
+    OtherEdition := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{0C3A7120-57EF-4142-B7E3-C94C8C0FDE46}_is1';
+#else
+    OtherEdition := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{C84B6577-FD18-4D39-99A4-E824A4826425}_is1';
+#endif
+    if RegKeyExists(HKLM64, OtherEdition) or RegKeyExists(HKCU64, OtherEdition) or
+       RegKeyExists(HKLM32, OtherEdition) or RegKeyExists(HKCU32, OtherEdition) then
+      Params := Params + ' -KeepSharedData';
+    Success := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+      Params, ExpandConstant('{tmp}'), SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Success := Success and (ResultCode = 0);
+    DeleteFile(Filename);
+  end;
+  if not Success then begin
+    Log(CustomMessage('CleanupIncomplete'));
+    SuppressibleMsgBox(CustomMessage('CleanupIncomplete'), mbInformation, MB_OK, IDOK);
+  end;
+end;
 

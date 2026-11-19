@@ -25,6 +25,10 @@
   Release workflows cache dependencies and compilation results to reduce repeated work in subsequent builds.
 
 ### 修复 / Fixed
+- 改进细描边字幕的填充色与描边色识别，利用同一视频中反复出现的配色减少 ASS 样式误判。
+  ASS color recognition now uses recurring color pairs in the same video to improve fill and thin-outline detection.
+- 卸载时清理 OCR 缓存、预览、临时文件和日志，并保留项目文件夹、视频、字幕及项目索引。
+  Uninstall now cleans OCR caches, previews, temporary files and logs while preserving project folders, videos, subtitles and the project index.
 - 调整 ASS 时间戳的帧对齐，减少在字幕编辑器中出现的起止帧偏移。
   Align ASS timestamps to video frames to reduce subtitle boundary offsets in editors.
 - 修复视频压制中的 ASS 与 SRT 字幕烧录。

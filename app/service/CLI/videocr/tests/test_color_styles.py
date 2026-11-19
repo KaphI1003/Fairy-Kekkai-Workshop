@@ -132,6 +132,18 @@ class SpatialColourTest(unittest.TestCase):
 
 
 class PaletteTest(unittest.TestCase):
+    def test_video_palette_requires_repeated_measured_fill_and_outline(self):
+        ink, rim = (230, 164, 227), (95, 51, 91)
+        good = observation(ink, rim)
+        other_rim = observation(ink, (30, 31, 32))
+        known = observation(*colors.stroke_colors.CALIBRATION[0])
+        samples = [good, good, other_rim, known, known, known,
+                   observation(ink, rim, frames=1), observation(ink, rim, confidence=.35)]
+        self.assertEqual(colors._learn_video_pairs(samples, range(len(samples))), ())
+        samples.append(good)
+        self.assertEqual(colors._learn_video_pairs(samples, range(len(samples))), ((ink, rim),))
+        self.assertNotIn((ink, rim), colors.stroke_colors.CALIBRATION)
+
     def test_rgb_bin_boundary_does_not_split_the_same_style(self):
         palettes, assigned = colors.build_palettes([
             observation((127, 30, 90)), observation((129, 31, 91)), observation((128, 32, 90))])

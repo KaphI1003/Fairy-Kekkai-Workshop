@@ -234,7 +234,7 @@ def _enclosed_pair(image: np.ndarray) -> ColorObservation:
     return best
 
 
-def _estimate_line(image: np.ndarray) -> ColorObservation:
+def _estimate_line(image: np.ndarray, video_pairs=()) -> ColorObservation:
     if min(image.shape[:2]) < 5:
         return ColorObservation()
     measured = _enclosed_pair(image)
@@ -245,7 +245,7 @@ def _estimate_line(image: np.ndarray) -> ColorObservation:
         step = max(2, image.shape[0] // 90)
         image = image[::step, ::step]
     keys = stroke_colors.quantize(image)
-    ranked = stroke_colors.rank_pairs(keys, stroke_colors.CALIBRATION)
+    ranked = stroke_colors.rank_pairs(keys, (*video_pairs, *stroke_colors.CALIBRATION))
     # Confirm orientation with enclosed glyphs if both directions match. A
     # narrow tint next to saturated ink is often chroma spill onto white.
     def evidence(item):
@@ -291,7 +291,7 @@ def _estimate_line(image: np.ndarray) -> ColorObservation:
     return measured
 
 
-def estimate_colors(image: np.ndarray, boxes: list[list[list[float]]]) -> ColorObservation:
+def estimate_colors(image: np.ndarray, boxes: list[list[list[float]]], video_pairs=()) -> ColorObservation:
     """Estimate an ordered colour pair independently in each OCR line/word."""
     observations = []
     height, width = image.shape[:2]
@@ -317,7 +317,7 @@ def estimate_colors(image: np.ndarray, boxes: list[list[list[float]]]) -> ColorO
                 crop = np.stack([ndimage.map_coordinates(image[..., channel],
                                  [coordinates[..., 1], coordinates[..., 0]], order=1, mode="nearest")
                                  for channel in range(3)], axis=-1)
-                observations.append(_estimate_line(crop))
+                observations.append(_estimate_line(crop, video_pairs))
                 continue
         left, top = np.floor(points.min(axis=0)).astype(int)
         right, bottom = np.ceil(points.max(axis=0)).astype(int)
@@ -325,7 +325,7 @@ def estimate_colors(image: np.ndarray, boxes: list[list[list[float]]]) -> ColorO
         crop = image[max(0, top - padding):min(height, bottom + padding + 1),
                      max(0, left - padding):min(width, right + padding + 1)]
         if crop.size:
-            observations.append(_estimate_line(crop))
+            observations.append(_estimate_line(crop, video_pairs))
     return fuse_observations(observations, within_frame=True)
 
 
@@ -493,16 +493,32 @@ def _visibility(image: np.ndarray, boxes: list[list[list[float]]]) -> float:
     return float(np.median(scores)) if scores else 0.0
 
 
-def _estimate_cue(images, boxes):
+def _estimate_cue(images, boxes, video_pairs=()):
     started = time.perf_counter()
     estimates = []
     for image in images:
-        estimates.append(estimate_colors(image, boxes))
+        estimates.append(estimate_colors(image, boxes, video_pairs) if video_pairs else estimate_colors(image, boxes))
         if (len(estimates) >= 2 and all(o.confidence >= .72 for o in estimates[:2])
                 and pair_distance(estimates[0], estimates[1]) <= .75):
             break
     observation = fuse_observations(estimates)
     return observation, len(estimates), os.getpid(), started, time.perf_counter()
+
+
+def _learn_video_pairs(observations, indices):
+    """Only promote locally measured pairs confirmed in multiple distinct cues."""
+    seeds = [i for i in indices if observations[i].confidence >= .73
+             and observations[i].frame_count >= 2 and observations[i].support >= 3
+             and observations[i].fill is not None and observations[i].outline is not None
+             and (observations[i].fill, observations[i].outline) not in stroke_colors.CALIBRATION]
+    learned = []
+    for group in _cluster_pairs(observations, seeds):
+        if len(group) < 3:
+            continue
+        medoid = min(group, key=lambda i: sum(pair_distance(observations[i], observations[j]) for j in group))
+        obs = observations[medoid]
+        learned.append((obs.fill, obs.outline))
+    return tuple(learned)
 
 
 def sample_video_colors(video_path: str, requests: list[ColorRequest], *,
@@ -528,14 +544,16 @@ def sample_video_colors(video_path: str, requests: list[ColorRequest], *,
     first_completed = os.getenv("FKW_OCR_COLOR_FIRST_COMPLETED", "1") != "0"
     stats.update(queue_wait_seconds=0.0, worker_gap_seconds=0.0)
     last_worker_end = {}
-    completed = 0
+    reported = set()
+    video_pairs = ()
     pool = None
 
-    def report_completed():
-        nonlocal completed
-        completed += 1
-        if progress and (completed % 25 == 0 or completed == len(requests)):
-            progress(completed, len(requests))
+    def report_completed(index):
+        if index in reported:
+            return
+        reported.add(index)
+        if progress and (len(reported) % 25 == 0 or len(reported) == len(requests)):
+            progress(len(reported), len(requests))
 
     def collect(index, images, boxes, future=None):
         nonlocal pool
@@ -547,7 +565,7 @@ def sample_video_colors(video_path: str, requests: list[ColorRequest], *,
                     pool = None
                     future = None
             if future is None:
-                result = _estimate_cue(images, boxes)
+                result = _estimate_cue(images, boxes, video_pairs)
             observations[index], count, pid, began, ended = result
             stats["analysed_frames"] += count
             # Cumulative worker time; the overall "seconds" field is wall time.
@@ -558,7 +576,7 @@ def sample_video_colors(video_path: str, requests: list[ColorRequest], *,
         except (OSError, ValueError) as error:
             observations[index] = ColorObservation(reason="sampling_error")
             stats["errors"].append({"cue": index, "error": str(error)})
-        report_completed()
+        report_completed(index)
 
     def collect_ready():
         blocked = time.perf_counter()
@@ -569,6 +587,32 @@ def sample_video_colors(video_path: str, requests: list[ColorRequest], *,
         for future in list(pending):
             if future in ready:
                 collect(*pending.pop(future), future)
+
+    def sampling_order():
+        nonlocal video_pairs
+        ordered = sorted(range(len(requests)), key=lambda i: requests[i].start_ms)
+        # Simultaneous OCR boxes for the same interval count as one seed cue.
+        distinct = []
+        last_end = -math.inf
+        for index in ordered:
+            request = requests[index]
+            if request.boxes and request.start_ms >= last_end and request.end_ms > request.start_ms:
+                distinct.append(index)
+                last_end = request.end_ms
+        if len(distinct) < 12:
+            yield from ordered
+            return
+        count = min(48, max(12, len(distinct) // 3))
+        pilot = [distinct[i] for i in np.linspace(0, len(distinct) - 1, count).round().astype(int)]
+        yield from pilot
+        while pending:
+            collect_ready()
+        video_pairs = _learn_video_pairs(observations, pilot)
+        stats["learned_pairs"] = len(video_pairs)
+        # Replay the pilot too when the hypotheses have changed. Otherwise its
+        # observations are already final and every cue is sampled exactly once.
+        reuse = set() if video_pairs else set(pilot)
+        yield from (i for i in ordered if i not in reuse)
 
     with ExitStack() as resources:
         container = resources.enter_context(av.open(video_path))
@@ -585,10 +629,10 @@ def sample_video_colors(video_path: str, requests: list[ColorRequest], *,
         iterator = None
         current_ms = -math.inf
         previous_frame = None
-        for index in sorted(range(len(requests)), key=lambda i: requests[i].start_ms):
+        for index in sampling_order():
             request = requests[index]
             if not request.boxes:
-                report_completed()
+                report_completed(index)
                 continue
             try:
                 elapsed = time.perf_counter() - started
@@ -645,14 +689,14 @@ def sample_video_colors(video_path: str, requests: list[ColorRequest], *,
                 observations[index] = ColorObservation(reason="sampling_error")
                 stats["errors"].append({"cue": index, "error": str(error)})
                 iterator = None
-                report_completed()
+                report_completed(index)
                 continue
 
             images = [item[2] for item in candidates]
             future = None
             if pool is not None:
                 try:
-                    future = pool.submit(_estimate_cue, images, boxes)
+                    future = pool.submit(_estimate_cue, images, boxes, video_pairs)
                 except (OSError, RuntimeError):
                     pool = None
             if future is None:
